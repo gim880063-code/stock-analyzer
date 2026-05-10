@@ -19,3 +19,7 @@ Thumbs.db
 # IDE
 .vscode/
 .idea/
+
+# 임시 디버그 스크립트
+test_*.py
+scratch_*.py
