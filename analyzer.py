@@ -709,10 +709,11 @@ def analyze(code: str, lite: bool = False) -> AnalysisResult:
             disclosures = []
             raw_disclosures_full = []
 
-    # 잠정실적공시 추출 (full 모드 + LLM 가능 시) — 분기 결산 신호 빠르게 반영
+    # 잠정실적공시 추출 — lite 모드에서도 실행 (1종목당 LLM 1회만 호출, 부담 적음)
+    # 안전 유니버스 스크리닝에서 분기 결산 신호 반영하려면 이게 필수.
     preliminary: dict | None = None
     preliminary_used_for_growth = False
-    if not lite and raw_disclosures_full and llm.is_configured():
+    if raw_disclosures_full and llm.is_configured():
         # 50개 공시 전체에서 잠정실적 후보를 찾음 (임원 신고 등으로 묻혀도 발견)
         # 후보 필터링 + 우선순위 정렬:
         #   1. "자회사의 주요경영사항"은 자회사 데이터라 모회사 분석에 부적합 → 제외

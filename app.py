@@ -248,11 +248,12 @@ with st.sidebar:
     # 시간 추정 (배치 LLM + 5/3 병렬 적용 후)
     est_codes = len(get_universe_codes(universe))
     if mode == "lite":
-        est_sec = est_codes * 3 / 5  # 종목당 3초, 5개 병렬
+        # lite도 잠정실적 추출(1회 LLM)은 함 → 종목당 ~5초, 5개 병렬
+        est_sec = est_codes * 5 / 5
         est_min = max(1, round(est_sec / 60))
-        st.caption(f"⏱️ 약 {est_min}분 예상 ({est_codes}개 ÷ 5병렬)")
+        st.caption(f"⏱️ 약 {est_min}분 예상 ({est_codes}개 ÷ 5병렬, 잠정실적 포함)")
     else:
-        est_sec = est_codes * 15 / 3  # 배치 LLM으로 종목당 ~15초, 3개 병렬
+        est_sec = est_codes * 15 / 3  # 풀 LLM 종목당 ~15초, 3개 병렬
         est_min = round(est_sec / 60)
         if est_codes > 50:
             st.warning(
@@ -582,7 +583,7 @@ def cached_analyze(code: str, lite: bool = False) -> dict:
 
 
 # 분석 로직이 바뀔 때마다 이 버전을 올려서 기존 캐시를 무효화
-ANALYZER_VERSION = "v19-2026-05-10-volume-numbers"
+ANALYZER_VERSION = "v20-2026-05-10-preliminary-in-lite"
 if st.session_state.get("_analyzer_cache_version") != ANALYZER_VERSION:
     cached_analyze.clear()
     st.session_state["_analyzer_cache_version"] = ANALYZER_VERSION
