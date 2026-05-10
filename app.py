@@ -583,7 +583,7 @@ def cached_analyze(code: str, lite: bool = False) -> dict:
 
 
 # 분석 로직이 바뀔 때마다 이 버전을 올려서 기존 캐시를 무효화
-ANALYZER_VERSION = "v21-2026-05-10-llm-retry-backoff"
+ANALYZER_VERSION = "v22-2026-05-10-screen-stale-filter"
 if st.session_state.get("_analyzer_cache_version") != ANALYZER_VERSION:
     cached_analyze.clear()
     st.session_state["_analyzer_cache_version"] = ANALYZER_VERSION
@@ -1003,19 +1003,36 @@ if screen_req:
         progress.empty()
         status.empty()
 
-        # 종합점수 내림차순 + 최소 점수 필터
-        screened.sort(key=lambda r: r.get("total", -999), reverse=True)
-        results = [r for r in screened if r.get("total", -999) >= min_score]
+        # 1) 재무 데이터 신선도 필터 — stale + 잠정실적 없음 = 제외
+        #    (작년 사업보고서만으로는 1Q 결과 반영 안 돼서 점수 신뢰도 낮음)
+        excluded_stale = 0
+        fresh_results = []
+        for r in screened:
+            src = r.get("sources") or {}
+            is_stale = (src.get("fin_freshness") or {}).get("is_stale", False)
+            has_preliminary = bool(r.get("preliminary"))
+            if is_stale and not has_preliminary:
+                excluded_stale += 1
+                continue
+            fresh_results.append(r)
+
+        # 2) 종합점수 내림차순 + 최소 점수 필터
+        fresh_results.sort(key=lambda r: r.get("total", -999), reverse=True)
+        results = [r for r in fresh_results if r.get("total", -999) >= min_score]
 
         mode_note = (
             "⚡ Lite 모드 — 공시 본문·뉴스 미포함."
             if use_lite
             else "🔬 Full 모드 — LLM 공시 분석 + 뉴스 포함."
         )
-        st.success(
-            f"✅ {len(codes)}개 분석 · {len(results)}개가 종합점수 ≥ {min_score:+d} 통과 "
-            f"(에러 {errors}건). {mode_note}"
+        msg = (
+            f"✅ {len(codes)}개 분석 · {len(results)}개 통과 "
+            f"(점수 ≥ {min_score:+d}, 에러 {errors}건"
         )
+        if excluded_stale > 0:
+            msg += f", **{excluded_stale}개 제외** — 재무 데이터 stale + 잠정실적 미발표"
+        msg += f"). {mode_note}"
+        st.success(msg)
         st.session_state.results = results
         if use_lite:
             st.info(
