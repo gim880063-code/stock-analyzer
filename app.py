@@ -74,7 +74,9 @@ def get_stock_dict() -> dict[str, str]:
 
 st.set_page_config(
     page_title="주식 분석 리포트",
-    page_icon="📈",
+    # 이모지 대신 PNG 이미지 URL — iOS Safari가 home screen 아이콘으로 사용하는 경우가 있음
+    # (Streamlit의 기본 PWA 매니페스트는 그대로라 Android에선 효과 제한적)
+    page_icon="https://abs.twimg.com/emoji/v2/72x72/1f4c8.png",
     layout="wide",
 )
 
