@@ -1,0 +1,1061 @@
+"""
+주식 분석 리포트 - Streamlit 웹 앱
+"""
+import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+
+import pandas as pd
+import streamlit as st
+
+from analyzer import (
+    KOREAN_NAMES, UNIVERSE_LABELS, all_korean_stocks, analyze,
+    get_universe_codes,
+)
+import dart
+import llm
+
+
+WATCHLIST_FILE = Path(__file__).parent / "data" / "watchlist.json"
+FAVORITES_FILE = Path(__file__).parent / "data" / "favorites.json"
+DEFAULT_WATCHLIST = ["005930", "000660", "035420"]
+
+
+def _load_str_list(path: Path) -> list[str]:
+    if path.exists():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, list) and all(isinstance(x, str) for x in data):
+                return data
+        except json.JSONDecodeError:
+            pass
+    return []
+
+
+def _save_str_list(path: Path, items: list[str]) -> None:
+    path.parent.mkdir(exist_ok=True)
+    path.write_text(json.dumps(items, ensure_ascii=False), encoding="utf-8")
+
+
+def load_watchlist() -> list[str]:
+    items = _load_str_list(WATCHLIST_FILE)
+    return items if items else DEFAULT_WATCHLIST.copy()
+
+
+def save_watchlist(codes: list[str]) -> None:
+    _save_str_list(WATCHLIST_FILE, codes)
+
+
+def load_favorites() -> list[str]:
+    return _load_str_list(FAVORITES_FILE)
+
+
+def save_favorites(codes: list[str]) -> None:
+    _save_str_list(FAVORITES_FILE, codes)
+
+
+def toggle_favorite(code: str) -> None:
+    favs = load_favorites()
+    if code in favs:
+        favs.remove(code)
+    else:
+        favs.append(code)
+    save_favorites(favs)
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_stock_dict() -> dict[str, str]:
+    """전체 KRX 종목 목록 (코드 → 이름). 24시간 캐시."""
+    try:
+        return all_korean_stocks()
+    except Exception:
+        return KOREAN_NAMES.copy()
+
+
+st.set_page_config(
+    page_title="주식 분석 리포트",
+    page_icon="📈",
+    layout="wide",
+)
+
+
+def _check_password() -> bool:
+    """
+    비밀번호 보호 — st.secrets에 APP_PASSWORD가 설정된 경우만 활성화.
+    로컬 개발(.env 사용)에선 자동으로 통과 (secrets 없음).
+    """
+    try:
+        configured = st.secrets.get("APP_PASSWORD", "")
+    except (FileNotFoundError, AttributeError, Exception):
+        return True
+    if not configured:
+        return True
+    if st.session_state.get("_authenticated"):
+        return True
+
+    st.markdown("## 🔒 주식 분석 리포트")
+    st.caption("비밀번호를 입력하세요")
+    pw = st.text_input("비밀번호", type="password", label_visibility="collapsed")
+    if pw == configured:
+        st.session_state["_authenticated"] = True
+        st.rerun()
+    elif pw:
+        st.error("비밀번호가 틀렸습니다.")
+    return False
+
+
+if not _check_password():
+    st.stop()
+
+st.title("📈 주식 분석 리포트")
+st.caption("관심 종목을 등록하면 추세·모멘텀·거래량·가격 리스크를 자동으로 점수화합니다.")
+
+
+# 사이드바: 관심 종목 관리
+with st.sidebar:
+    st.header("관심 종목")
+
+    stock_dict = get_stock_dict()
+    options = [f"{code} {name}" for code, name in sorted(stock_dict.items())]
+
+    # 즐겨찾기 클릭으로 추가 요청된 코드를 multiselect 렌더 전에 주입
+    pending_to_add = st.session_state.pop("_pending_add_to_watchlist", [])
+    if pending_to_add:
+        current = st.session_state.get("watchlist_select")
+        if current is None:
+            saved = load_watchlist()
+            current = [f"{c} {stock_dict.get(c, '?')}" for c in saved if c in stock_dict]
+        for c in pending_to_add:
+            opt = f"{c} {stock_dict.get(c, '?')}"
+            if opt in options and opt not in current:
+                current = current + [opt]
+        st.session_state["watchlist_select"] = current
+
+    saved_codes = load_watchlist()
+    default_options = [f"{c} {stock_dict.get(c, '?')}" for c in saved_codes if c in stock_dict]
+
+    multiselect_kwargs = {
+        "options": options,
+        "help": "입력창에 '삼성', '하이닉스', '005930' 등을 타이핑하면 검색됩니다",
+        "placeholder": "예: 삼성전자",
+        "key": "watchlist_select",
+    }
+    if "watchlist_select" not in st.session_state:
+        multiselect_kwargs["default"] = default_options
+
+    selected = st.multiselect("종목 검색 (이름·코드 모두 가능)", **multiselect_kwargs)
+    selected_codes = [s.split(maxsplit=1)[0] for s in selected]
+
+    custom_code = st.text_input(
+        "여기 없는 종목코드 직접 추가 (6자리)",
+        placeholder="예: 005935",
+        max_chars=6,
+    )
+    if custom_code and custom_code.strip().isdigit() and len(custom_code.strip()) == 6:
+        if custom_code.strip() not in selected_codes:
+            selected_codes.append(custom_code.strip())
+
+    # 변경될 때마다 자동 저장
+    save_watchlist(selected_codes)
+
+    st.divider()
+    run_analysis = st.button("🔍 분석하기", type="primary", use_container_width=True)
+
+    st.divider()
+    if dart.is_configured():
+        st.success("✅ DART API 키 연결됨\n\n가치/재무/성장성/공시 포함")
+    else:
+        st.warning("⚠️ DART API 키 미설정\n\n`.env` 파일에 `DART_API_KEY` 입력 후 재시작하세요")
+
+    if llm.is_configured():
+        st.success("✅ Gemini API 키 연결됨\n\n공시 자동 분류·요약 활성화")
+    else:
+        st.info("ℹ️ Gemini API 키 미설정 — 공시는 룰 기반 분류만 동작 (`GEMINI_API_KEY`)")
+
+    st.divider()
+    st.subheader("⭐ 즐겨찾기")
+    st.caption("종목명 클릭 시 자동으로 분석됩니다")
+    favorites = load_favorites()
+
+    if not favorites:
+        st.caption("종목 카드의 ☆ 버튼으로 추가하세요")
+    else:
+        results_map = {r["code"]: r for r in st.session_state.get("results", [])}
+        for code in favorites:
+            name = stock_dict.get(code, "?")
+            r = results_map.get(code)
+            with st.container(border=True):
+                col_main, col_x = st.columns([5, 1])
+                with col_main:
+                    btn_label = f"⭐  {name}  ({code})"
+                    if st.button(
+                        btn_label,
+                        key=f"fav_btn_{code}",
+                        use_container_width=True,
+                        help=f"{name}만 단독 분석 (워치리스트 유지)",
+                    ):
+                        st.session_state["_focus_code"] = code
+                        st.rerun()
+
+                    if r and not r.get("error"):
+                        score = r["total"]
+                        opinion = r["opinion"].split(" — ")[0]
+                        color = "#1f7a3a" if score > 0 else ("#a3201a" if score < 0 else "#666")
+                        st.markdown(
+                            f"<small>{r['last_close']:,.0f}원 ({r['change_pct']:+.2f}%) · "
+                            f"<span style='color:{color};font-weight:600'>"
+                            f"{score:+d}점 · {opinion}</span></small>",
+                            unsafe_allow_html=True,
+                        )
+
+                with col_x:
+                    if st.button("✖", key=f"unfav_{code}", help="즐겨찾기 해제"):
+                        toggle_favorite(code)
+                        st.rerun()
+
+        if st.button("⭐ 즐겨찾기만 분석", use_container_width=True, key="analyze_favs"):
+            st.session_state["_analyze_favs_only"] = True
+            st.rerun()
+        st.caption("워치리스트와 별도로 즐겨찾기만 분석합니다")
+
+    st.divider()
+    st.subheader("🔍 종목 발굴 (스크리닝)")
+    st.caption("종합점수 높은 종목을 자동 검색")
+
+    universe = st.selectbox(
+        "유니버스",
+        options=list(UNIVERSE_LABELS.keys()),
+        format_func=lambda k: UNIVERSE_LABELS[k],
+        key="screen_universe_select",
+        help="🛡️ 안전 유니버스 = 시총 5조+ / 거래대금 500억+ / 관리종목 등 제외 — 작전주 위험 낮은 후보들",
+    )
+
+    min_score = st.slider("최소 종합점수", -10, 10, 0, 1, key="screen_min_score")
+
+    mode = st.radio(
+        "분석 강도",
+        options=["lite", "full"],
+        format_func=lambda m: {
+            "lite": "⚡ 빠른 모드 (점수만, 종목당 ~3초)",
+            "full": "🔬 풀 분석 (+LLM 공시 +뉴스, 종목당 ~30초)",
+        }[m],
+        index=0,
+        key="screen_mode",
+    )
+
+    # 시간 추정 (배치 LLM + 5/3 병렬 적용 후)
+    est_codes = len(get_universe_codes(universe))
+    if mode == "lite":
+        est_sec = est_codes * 3 / 5  # 종목당 3초, 5개 병렬
+        est_min = max(1, round(est_sec / 60))
+        st.caption(f"⏱️ 약 {est_min}분 예상 ({est_codes}개 ÷ 5병렬)")
+    else:
+        est_sec = est_codes * 15 / 3  # 배치 LLM으로 종목당 ~15초, 3개 병렬
+        est_min = round(est_sec / 60)
+        if est_codes > 50:
+            st.warning(
+                f"⏱️ 풀 분석 — 약 {est_min}분 예상. "
+                "Gemini Pro 일일 한도(25~50회)를 넘을 수 있어 일부는 Flash 결과로 대체됩니다."
+            )
+        else:
+            st.caption(f"⏱️ 약 {est_min}분 예상 ({est_codes}개 ÷ 3병렬)")
+
+    if st.button("🔍 발굴 시작", use_container_width=True, key="run_screen"):
+        st.session_state["_screen"] = {
+            "universe": universe,
+            "min_score": min_score,
+            "lite": mode == "lite",
+        }
+        st.rerun()
+
+    st.divider()
+    st.subheader("📚 용어 사전")
+    st.caption("처음이라면 펼쳐서 읽어보세요")
+
+    with st.expander("📈 추세 / 60일선"):
+        st.markdown("""
+**추세**: 주가가 큰 방향으로 어디로 가고 있는가.
+
+**60일 이동평균선 (60일선)**: 최근 60일 종가의 평균을 이은 선. **중기 추세**를 보는 가장 보편적인 기준입니다.
+
+- 현재가 > 60일선 → 중기 상승 흐름 ✅
+- 현재가 < 60일선 → 중기 하락 흐름 ⚠️
+
+📌 **예시:** 삼성전자 현재가 268,500원, 60일선 200,025원 → 60일선 위 → 중기 흐름 양호.
+
+**왜 보나?** 하루이틀 흔들림에 휘둘리지 않고 큰 방향을 잡기 위해.
+""")
+
+    with st.expander("⚡ 모멘텀 / RSI"):
+        st.markdown("""
+**모멘텀**: 주가의 상승/하락 "기운"이 얼마나 강한가.
+
+**RSI (14일)**: 최근 14일간 오른 날과 내린 날의 비율을 0~100으로 표시.
+
+| RSI | 의미 |
+|---|---|
+| 70 이상 | 🔴 단기 **과열** — 조정 가능성 |
+| 50~70 | 🟢 상승 모멘텀 유효 |
+| 30~50 | ⚪ 모멘텀 약화 |
+| 30 이하 | 🟢 단기 **과매도** — 반등 가능성 |
+
+📌 **예시:** SK하이닉스 RSI 93 → 극단적 과열 → 단기 조정 주의.
+
+**왜 보나?** 좋은 종목도 너무 빨리 오르면 잠시 쉬어갑니다. 비싸게 사지 않기 위해.
+""")
+
+    with st.expander("📊 거래량"):
+        st.markdown("""
+**거래량**: 그날 사고팔린 주식 수. 가격 움직임의 "무게"를 알려줍니다.
+
+20일 평균 대비 비율 + 최근 5일 가격 방향을 함께 봅니다:
+
+| 조합 | 의미 | 점수 |
+|---|---|---|
+| 평균 ≥1.5배 + 가격 상승 | ✅ 매수세 유입 | +1 |
+| 평균 ≥1.5배 + 가격 하락 | ⚠️ 매도 압력 | -1 |
+| **평균 <0.6배 + 단기 상승** | ⚠️ **거래량 부족 — 상승 신뢰도 약함** | **-1** |
+| 평균 <0.6배 + 단기 하락 | 매도 압력도 약함 | 0 |
+| 그 외 | 평소 수준 | 0 |
+
+📌 **예시:** 어떤 종목이 5일 +5% 상승했는데 거래량은 평균의 0.49배 → "사람들이 의심하면서 살짝 오른 것" → 신뢰도 낮음.
+
+**왜 보나?** 거래량 없는 가격 변동은 신뢰도가 낮습니다.
+""")
+
+    with st.expander("🚨 가격 리스크"):
+        st.markdown("""
+**단기 변동성이 너무 커진 상태인가** 를 봅니다. 여러 신호가 누적되면 점수가 깊어집니다.
+
+| 트리거 | 점수 |
+|---|---|
+| 5일 +15% 이상 급등 | -2 |
+| 5일 +8~15% 상승 | -1 |
+| **RSI 80 이상 (극단 과열)** | -1 |
+| **52주 고점 97% 이상 근접** | -1 |
+| 20일 고점 대비 -10% 이상 조정 | -1 |
+
+(최대 -2점까지 누적)
+
+📌 **예시:** SK하이닉스 5일 +30% 급등 + RSI 93 → 두 신호 다 발동 → -2점 (cap).
+
+**왜 보나?** 좋은 종목이라도 비싼 시점에 진입하면 단기 손실 위험이 커집니다. 단일 신호가 아닌 **여러 신호의 누적**으로 봐야 정확합니다.
+""")
+
+    with st.expander("💰 수급 (외국인/기관)"):
+        st.markdown("""
+**큰 손**들이 사고 있는가, 팔고 있는가.
+
+- **외국인**: 해외 자금. 보통 장기적·기관적 시각.
+- **기관**: 연기금/자산운용사 등 국내 전문 투자자.
+
+| 신호 | 의미 |
+|---|---|
+| 외국인 + 기관 동반 순매수 | ✅ 강한 수급 |
+| 동반 순매도 | ⚠️ 수급 이탈 |
+| 외국인 5일 연속 순매수 | ✅ 추세적 매집 |
+| 외국인 보유율 상승 | ✅ 장기 신뢰 |
+
+📌 **예시:** NAVER는 외국인+기관 동반 순매도 + 외국인 보유율 -0.9%p → 수급 약화.
+
+**왜 보나?** 큰 자금의 방향은 가격을 움직이는 가장 강한 힘 중 하나입니다.
+""")
+
+    with st.expander("💎 가치 / PER · PBR"):
+        st.markdown("""
+**가치**: 지금 가격이 비싼가, 싼가 (실적·자산 대비).
+
+### PER (주가수익비율)
+> 현재 주가 ÷ 1주당 순이익
+
+"이 회사 **1년 이익의 몇 배** 가격에 거래되는가"
+
+| PER | 의미 |
+|---|---|
+| 10 이하 | 🟢 저평가 가능성 |
+| 10~20 | ⚪ 보통 |
+| 20 이상 | 🔴 고평가 (성장 기대 반영) |
+
+### PBR (주가순자산비율)
+> 현재 주가 ÷ 1주당 순자산
+
+"회사가 **청산되면 받을 수 있는 돈의 몇 배**에 거래되는가"
+
+| PBR | 의미 |
+|---|---|
+| 1 미만 | 🟢 자본 대비 저평가 |
+| 1~2 | ⚪ 보통 |
+| 2 이상 | 🔴 자본 대비 고평가 |
+
+📌 **예시:** 삼성전자 PER 34.7 / PBR 3.60 → 둘 다 고평가 영역.
+
+**주의:** 업종마다 적정 PER이 다릅니다 (제조업 ↓ / IT·바이오 ↑). 같은 업종 내 비교가 더 의미 있어요.
+""")
+
+    with st.expander("🏥 재무 건전성 / ROE · 부채비율"):
+        st.markdown("""
+**회사의 체력**을 봅니다.
+
+### ROE (자기자본이익률)
+> 당기순이익 ÷ 자본총계 × 100
+
+"가진 자본으로 **얼마나 효율적으로 돈을 벌었는가**"
+
+| ROE | 의미 |
+|---|---|
+| 15% 이상 | 🟢 우수 |
+| 8~15% | ⚪ 양호 |
+| 8% 미만 | 🔴 낮음 |
+| 마이너스 | ❌ 적자 |
+
+### 부채비율
+> 부채총계 ÷ 자본총계 × 100
+
+"자본 1원당 빚이 얼마인가"
+
+| 부채비율 | 의미 |
+|---|---|
+| 100% 이하 | 🟢 안정적 |
+| 100~200% | ⚪ 양호 |
+| 200% 이상 | 🔴 부채 부담 |
+
+📌 **예시:** SK하이닉스 ROE 35.6% (우수) + 부채비율 46% (안정) → 매우 건강.
+
+**주의:** 금융업·조선업·건설업은 구조상 부채비율이 높습니다.
+""")
+
+    with st.expander("🛡️ 안전 유니버스 (작전주 회피)"):
+        st.markdown("""
+**작전주(주가 조작 위험 종목)** 를 자동으로 걸러낸 후보 종목 묶음입니다.
+
+### 4단계 필터
+
+| 조건 | 의도 |
+|---|---|
+| **시가총액 ≥ 5조원** | 시총이 큰 회사는 시장 조작에 큰 자금 필요 → 작전주 어려움 |
+| **하루 거래대금 ≥ 500억원** | 유동성 충분 → 큰 매수·매도 흡수 가능, 가격 왜곡 어려움 |
+| **유통주식 충분 (간접)** | 시총·거래대금 통과 시 자연스럽게 충족 |
+| **공시 분류 정상** | 관리종목·투자주의환기·SPAC·외국기업 제외 → 공시 투명·정상 |
+
+### 단계별 효과 (오늘 KRX 기준)
+
+```
+전체:                        2,878개
+시총 5조 이상:                  135개
++ 거래대금 500억 이상:           94개
++ 정상 분류 (관리종목 등 제외):   83개
+```
+
+→ 약 **3% (83개)** 만 통과. 모두 KOSPI 대형주.
+
+### 기준값
+
+| 항목 | 값 | 통과 종목 |
+|---|---|---|
+| 시가총액 | 5조원 이상 | 약 90개 |
+| 일일 거래대금 | 500억원 이상 | (위 + 거래대금 필터) |
+| 분류 | 관리종목·SPAC·외국기업 제외 | (정상 분류만) |
+
+### 한계
+
+- 작전주 위험이 **0**은 아님 — 대형주도 단기 조정 가능
+- "좋은 종목"이 아니라 "위험 분류는 아닌 종목" — 진입 안전성 ≠ 수익성
+- 종합점수가 함께 좋아야 매수 후보 (스크리닝의 본질)
+
+**권장 사용:** 안전 유니버스 → 종합점수 ≥ 0 필터 → 후보 5~10개 발견 → 즐겨찾기 → 풀 분석으로 깊이 검증
+""")
+
+    with st.expander("📰 종목 뉴스"):
+        st.markdown("""
+**참고용**으로만 표시되는 최근 종목 관련 뉴스 헤드라인입니다.
+
+- 출처: 네이버 금융 종목뉴스 (HTML 스크래핑)
+- **점수에 영향 없음** — 정보만 제공
+- 광고성·추측성 기사가 섞일 수 있으니 본인 판단 필요
+
+### 왜 점수에 안 넣었나?
+
+| 함정 | 영향 |
+|---|---|
+| "[속보] OO 호재 폭발" 류 광고성 기사 | LLM이 호재로 분류 → 점수 왜곡 |
+| 같은 사건을 10곳이 다른 톤으로 보도 | 중복 제거 어려움 |
+| 작전주 리딩방 글 | 잘못된 신호 |
+
+**DART 공시는 법적 책임이 있는 사실**이지만 뉴스는 추측·해설이 섞여 있어서 점수화하지 않습니다.
+
+### 뉴스 vs DART 공시 역할
+
+- **DART 공시** = 사실의 1차 자료 (점수에 반영)
+- **뉴스** = 산업·정책·시장 분위기 (참고용)
+
+뉴스로 "어 무슨 일 있나?" 확인 → DART에서 사실 검증 순서로 활용하세요.
+""")
+
+    with st.expander("📋 공시 (DART)"):
+        st.markdown("""
+**공시**: 회사가 의무적으로 알려야 하는 중대 사건 — 수주, 증자, 소송, 지분 변동, 정기 실적 보고 등.
+
+DART OPEN API에서 최근 30일 공시 목록을 받아서 **Gemini로 분류**합니다.
+
+| 카테고리 | 점수 | 예시 |
+|---|---|---|
+| 🚨 **중대** | -2 | 횡령·배임, 상장폐지사유, 회생/파산, 감자, 거래정지 |
+| ⚠️ **부정** | -1 | 유상증자, 전환사채, 소송 제기, 영업정지 |
+| ✅ **긍정** | +1 | 단일판매·공급계약(수주), 자사주 매입, 신규시설투자 |
+| ⚪ **중립** | 0 | 정기보고서, 임원·주요주주 변동, 대량보유보고서 |
+
+**점수 산출:**
+- 중대 1건이라도 → -2
+- 부정 ≥1건 → -1 (중대 없을 때)
+- 긍정 ≥1건 → +1 (부정/중대 없을 때)
+
+**처리 흐름:**
+1. **모든 공시** → Gemini Flash로 제목 분류 (빠름, 캐시됨)
+2. **중요 공시 상위 3개** → Gemini Pro로 본문까지 깊이 분석 (캐시됨)
+3. 같은 공시(`rcept_no`)는 **한 번만 LLM 호출** — 새 공시 올라오기 전까지 재사용
+
+각 공시 옆 표시:
+- 🧠 = Pro로 본문 분석 완료
+- ⚡ = Flash 제목 분류만
+- (없음) = 룰 기반 분류 (LLM 키 없을 때)
+
+📌 **예시:** 단일판매·공급계약체결 → ✅ 긍정 → "5,000억원 규모 ASML 계약, 매출의 X%" 같은 요약.
+
+**한계:** 정기보고서(사업보고서)는 너무 길어서 본문 분석 안 함. 핵심 공시(수주·증자·소송)만 깊이 분석.
+""")
+
+    with st.expander("🚀 성장성"):
+        st.markdown("""
+**작년 대비 회사가 얼마나 컸는가** — 매출 성장 + **영업이익의 흑자/적자 상태와 마진 변화**를 함께 봅니다.
+
+### 매출 성장률
+| 매출 성장률 | 점수 |
+|---|---|
+| 15% 이상 | +1 |
+| 5~15% | 0 |
+| 0~5% | 0 |
+| 마이너스 | -1 |
+
+### 영업이익 (흑자/적자 상태가 핵심)
+| 상태 변화 | 점수 |
+|---|---|
+| 흑자 → 흑자, **마진 +1%p 이상 개선** | +1 |
+| 흑자 → 흑자, 마진 비슷 | 0 |
+| 흑자 → 흑자, **마진 -2%p 이상 악화** | -1 |
+| **적자 → 흑자 (흑자전환)** | **+2** |
+| **흑자 → 적자 (적자전환)** | **-2** |
+| 적자 → 적자, 손실 폭 축소 | 0 |
+| 적자 → 적자, 손실 확대 | -1 |
+
+⚠️ **단순 +426% 같은 % 숫자는 함정**입니다. 작년 영업이익이 -100억이었다가 -50억이 되면 성장률 표면 숫자는 좋아 보이지만 여전히 적자입니다. 그래서 이 앱은 **영업이익률(margin)** 변화를 직접 봅니다.
+
+📌 **예시:**
+- SK하이닉스: 흑자 → 흑자, 마진 크게 개선 → +1
+- 어떤 적자 회사가 손실을 줄임 → 0 (좋아진 것이지만 아직 흑자가 아님)
+- 흑자 회사가 적자전환 → -2 (가장 강한 부정 신호)
+""")
+
+    with st.expander("🎯 종합점수와 의견"):
+        st.markdown("""
+모든 항목 점수를 더해 종합점수를 냅니다. **가능한 양의 점수 합 대비 비율**로 의견을 결정합니다:
+
+| 의견 | 기준 (비율) | 뜻 |
+|---|---|---|
+| ✨ **관심 유지** | ≥ 50% | 다수 지표가 우호적 |
+| 🟡 **분할 접근 가능** | ≥ 20% | 일부 위험 있어 나눠서 매수 권장 |
+| ⚪ **중립** | ≥ 0% | 긍정·부정 신호 비슷, **추가 확인 필요** |
+| 👀 **관망** | ≥ -30% | 위험 요인 많음, 진입 미루는 게 안전 |
+| ⚠️ **리스크 확대** | < -30% | 다수 부정적, 신중 |
+
+**0점은 더 이상 "분할 접근"이 아닙니다.** 0~약간 양수는 "중립"으로 분류돼 추가 확인을 권장합니다.
+
+**중요:** 이 앱은 **매수·매도 추천이 아닙니다**. 여러 지표를 정리해서 보여줄 뿐, 최종 판단은 본인의 몫입니다.
+""")
+
+
+# 분석 결과 캐시
+@st.cache_data(ttl=600, show_spinner=False)
+def cached_analyze(code: str, lite: bool = False) -> dict:
+    return analyze(code, lite=lite)
+
+
+# 분석 로직이 바뀔 때마다 이 버전을 올려서 기존 캐시를 무효화
+ANALYZER_VERSION = "v19-2026-05-10-volume-numbers"
+if st.session_state.get("_analyzer_cache_version") != ANALYZER_VERSION:
+    cached_analyze.clear()
+    st.session_state["_analyzer_cache_version"] = ANALYZER_VERSION
+
+
+def score_color(score: int) -> str:
+    if score > 0:
+        return "🟢"
+    if score < 0:
+        return "🔴"
+    return "⚪"
+
+
+def opinion_emoji(total: int) -> str:
+    if total >= 2:
+        return "✨"
+    if total >= 0:
+        return "🟡"
+    if total >= -2:
+        return "👀"
+    return "⚠️"
+
+
+SCORE_COLUMNS = ["추세", "모멘텀", "거래량", "가격 리스크", "수급", "공시", "가치", "재무 건전성", "성장성"]
+
+
+def _cell_color(val) -> str:
+    if pd.isna(val):
+        return ""
+    try:
+        v = float(val)
+    except (TypeError, ValueError):
+        return ""
+    if v >= 2:
+        return "background-color: rgba(46, 160, 67, 0.45); color: #0d3a1a; font-weight: 700"
+    if v == 1:
+        return "background-color: rgba(46, 160, 67, 0.22); color: #1f7a3a; font-weight: 600"
+    if v == 0:
+        return ""
+    if v == -1:
+        return "background-color: rgba(248, 81, 73, 0.22); color: #a3201a; font-weight: 600"
+    if v <= -2:
+        return "background-color: rgba(248, 81, 73, 0.45); color: #5a0e0a; font-weight: 700"
+    return ""
+
+
+def _fmt_signed(val) -> str:
+    if pd.isna(val):
+        return "-"
+    try:
+        return f"{int(val):+d}"
+    except (TypeError, ValueError):
+        return str(val)
+
+
+def render_summary_table(results: list[dict]) -> None:
+    rows = []
+    for r in results:
+        if r["error"]:
+            row = {
+                "종목": f"{r['name']} ({r['code']})",
+                "현재가": "-",
+                "등락률": "-",
+                **{c: None for c in SCORE_COLUMNS},
+                "종합점수": None,
+                "의견": r["error"],
+            }
+            rows.append(row)
+            continue
+
+        score_map = {s["name"]: s["score"] for s in r["scores"]}
+        fresh = (r.get("sources") or {}).get("fin_freshness") or {}
+        stale_mark = " 📅" if fresh.get("is_stale") else ""
+        row = {
+            "종목": f"{r['name']} ({r['code']}){stale_mark}",
+            "현재가": f"{r['last_close']:,.0f}원",
+            "등락률": f"{r['change_pct']:+.2f}%",
+            **{c: score_map.get(c) for c in SCORE_COLUMNS},
+            "종합점수": r["total"],
+            "의견": r["opinion"].split(" — ")[0],
+        }
+        rows.append(row)
+
+    df = pd.DataFrame(rows)
+    score_cols = [c for c in SCORE_COLUMNS if c in df.columns] + ["종합점수"]
+
+    styled = (
+        df.style
+        .map(_cell_color, subset=score_cols)
+        .format({c: _fmt_signed for c in score_cols}, na_rep="-")
+    )
+
+    st.dataframe(styled, use_container_width=True, hide_index=True)
+
+
+CATEGORY_META = {
+    "critical": {"emoji": "🚨", "label": "중대 공시", "render": "error"},
+    "negative": {"emoji": "⚠️", "label": "부정 공시", "render": "warning"},
+    "positive": {"emoji": "✅", "label": "긍정 공시", "render": "success"},
+    "neutral":  {"emoji": "📋", "label": "중립/정보 공시", "render": "neutral"},
+}
+
+
+def _render_one_disclosure(d: dict, brief: bool = False) -> None:
+    title = (d.get("title") or "(제목 없음)").strip()
+    url = d.get("url") or ""
+    title_md = f"[{title}]({url})" if url else title
+    submitter = d.get("submitter", "")
+    summary = (d.get("summary") or "").strip()
+    key_points = d.get("key_points") or []
+    rationale = (d.get("rationale") or "").strip()
+    model = d.get("model", "")
+
+    if brief:
+        st.markdown(
+            f"- `{d['date']}` {title_md}  <small>· _{submitter}_</small>",
+            unsafe_allow_html=True,
+        )
+        return
+
+    badge = ""
+    if model.startswith("gemini-2.5-pro"):
+        badge = " 🧠"  # 본문 깊이 분석됨
+    elif model.startswith("gemini-2.5-flash") or model.startswith("gemini-2.0-flash"):
+        badge = " ⚡"  # 제목 분류만
+
+    st.markdown(
+        f"**`{d['date']}` {title_md}{badge}**  <small>_{submitter}_</small>",
+        unsafe_allow_html=True,
+    )
+    if summary and summary != title:
+        st.markdown(f"&nbsp;&nbsp;&nbsp;💡 {summary}", unsafe_allow_html=True)
+    for pt in key_points:
+        st.markdown(f"&nbsp;&nbsp;&nbsp;• {pt}", unsafe_allow_html=True)
+    if rationale:
+        st.markdown(
+            f"&nbsp;&nbsp;&nbsp;<small>📌 _{rationale}_</small>",
+            unsafe_allow_html=True,
+        )
+
+
+def _render_disclosures(disclosures: list[dict]) -> None:
+    by_cat: dict[str, list[dict]] = {"critical": [], "negative": [], "positive": [], "neutral": []}
+    for d in disclosures:
+        by_cat.setdefault(d.get("category", "neutral"), by_cat["neutral"]).append(d)
+
+    n_total = len(disclosures)
+    n_important = len(by_cat["critical"]) + len(by_cat["negative"]) + len(by_cat["positive"])
+
+    if n_important == 0:
+        with st.expander(f"📋 최근 30일 DART 공시 — routine만 ({n_total}건)"):
+            for d in disclosures:
+                _render_one_disclosure(d, brief=True)
+        return
+
+    st.markdown("**📋 최근 30일 DART 공시**")
+
+    for cat in ("critical", "negative", "positive"):
+        items = by_cat[cat]
+        if not items:
+            continue
+        meta = CATEGORY_META[cat]
+        header = f"{meta['emoji']} {meta['label']} {len(items)}건"
+        if meta["render"] == "error":
+            st.error(header)
+        elif meta["render"] == "warning":
+            st.warning(header)
+        else:
+            st.success(header)
+        with st.container():
+            for d in items:
+                _render_one_disclosure(d)
+
+    if by_cat["neutral"]:
+        with st.expander(f"📋 중립/정보 공시 {len(by_cat['neutral'])}건"):
+            for d in by_cat["neutral"]:
+                _render_one_disclosure(d, brief=True)
+
+
+def render_stock_card(r: dict, favorites: list[str]) -> None:
+    if r["error"]:
+        st.error(f"**{r['name']} ({r['code']})** — {r['error']}")
+        return
+
+    is_fav = r["code"] in favorites
+    src = r.get("sources") or {}
+    fresh = src.get("fin_freshness") or {}
+    is_stale = fresh.get("is_stale", False)
+
+    with st.container(border=True):
+        header_col, star_col, date_col = st.columns([5, 1, 2])
+        with header_col:
+            st.subheader(f"{r['name']}  `{r['code']}`")
+        with star_col:
+            star_label = "⭐" if is_fav else "☆"
+            tooltip = "즐겨찾기 해제" if is_fav else "즐겨찾기 추가"
+            if st.button(star_label, key=f"star_{r['code']}", help=tooltip):
+                toggle_favorite(r["code"])
+                st.rerun()
+        with date_col:
+            st.caption(f"{r['last_date']} 기준")
+
+        if is_stale and src.get("fin_report_label"):
+            days_old = fresh.get("days_since_coverage", 0)
+            next_exp = fresh.get("next_expected", "")
+            if src.get("preliminary_used_for_growth"):
+                st.success(
+                    f"📢 **잠정실적공시 반영됨** — 성장성 점수가 잠정실적 데이터로 갱신됐습니다. "
+                    f"(정식 보고서: `{src['fin_report_label']}`, {days_old}일 경과)"
+                )
+            else:
+                st.warning(
+                    f"📅 **재무 데이터 갱신 가능성** — `{src['fin_report_label']}` "
+                    f"기준 (회계기간 종료 후 {days_old}일 경과). "
+                    f"**{next_exp}보고서**가 아직 DART에 미제출이라 가치/재무/성장성 점수는 "
+                    f"이 시점 이후 변화를 못 잡습니다."
+                )
+
+        prelim = r.get("preliminary")
+        if prelim and prelim.get("revenue") is not None:
+            with st.expander(
+                f"📢 잠정실적 — {prelim.get('period_label', '?')} "
+                f"({prelim.get('disclosure_date', '')} 공시)"
+            ):
+                cols = st.columns(3)
+                rev = prelim.get("revenue")
+                rev_yoy = prelim.get("revenue_yoy")
+                op = prelim.get("operating_income")
+                op_yoy = prelim.get("operating_income_yoy")
+                ni = prelim.get("net_income")
+                ni_yoy = prelim.get("net_income_yoy")
+
+                def _fmt_money(v):
+                    if v is None:
+                        return "—"
+                    sign = "▼ " if v < 0 else ""
+                    if abs(v) >= 1_000_000_000_000:
+                        return f"{sign}{v / 1_000_000_000_000:.2f}조원"
+                    if abs(v) >= 100_000_000:
+                        return f"{sign}{v / 100_000_000:.0f}억원"
+                    return f"{sign}{v:,}원"
+
+                def _fmt_growth(curr, prev):
+                    if curr is None or prev in (None, 0):
+                        return ""
+                    pct = (curr / prev - 1) * 100 if prev != 0 else 0
+                    if prev < 0 and curr >= 0:
+                        return " (흑자전환)"
+                    if prev >= 0 and curr < 0:
+                        return " (적자전환)"
+                    if prev < 0 and curr < 0 and curr > prev:
+                        return " (적자축소)"
+                    return f" ({pct:+.1f}%)"
+
+                cols[0].metric("매출", _fmt_money(rev), delta=_fmt_growth(rev, rev_yoy) or None)
+                cols[1].metric("영업이익", _fmt_money(op), delta=_fmt_growth(op, op_yoy) or None)
+                cols[2].metric("당기순이익", _fmt_money(ni), delta=_fmt_growth(ni, ni_yoy) or None)
+
+                st.caption(
+                    f"_{prelim.get('disclosure_title', '')}_  \n"
+                    "⚠️ 잠정실적 = 회사 자체 발표, 외부 감사 전. 정식 보고서와 차이 가능."
+                )
+
+        m1, m2, m3 = st.columns(3)
+        m1.metric("현재가", f"{r['last_close']:,.0f}원", f"{r['change_pct']:+.2f}%")
+        m2.metric("종합점수", f"{r['total']:+d}점")
+        m3.metric("의견", f"{opinion_emoji(r['total'])} {r['opinion'].split(' — ')[0]}")
+
+        if r.get("history"):
+            hist = pd.DataFrame(r["history"]).set_index("Date")
+            st.markdown("**최근 120일 종가 / 20일선 / 60일선**")
+            st.line_chart(hist, height=240)
+
+        st.markdown("**항목별 분석**")
+        score_rows = []
+        for s in r["scores"]:
+            score_rows.append({
+                "": score_color(s["score"]),
+                "항목": s["name"],
+                "분석": s["msg"],
+                "점수": s["score"],
+            })
+        score_df = pd.DataFrame(score_rows)
+        st.dataframe(
+            score_df,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "점수": st.column_config.NumberColumn(format="%+d", width="small"),
+                "": st.column_config.TextColumn(width="small"),
+            },
+        )
+
+        st.info(f"💡 {r['opinion']}")
+
+        disclosures = r.get("disclosures") or []
+        if disclosures:
+            _render_disclosures(disclosures)
+
+        news = r.get("news") or []
+        has_dart_or_naver = (r.get("sources") or {}).get("price_last_date")
+        if news:
+            with st.expander(f"📰 최근 종목 뉴스 ({len(news)}건) — 참고용"):
+                st.caption(
+                    "⚠️ 뉴스는 **점수에 영향 없습니다**. 종목명이 제목에 직접 포함된 기사만 표시됩니다."
+                )
+                for n in news:
+                    title = (n.get("title") or "").strip() or "(제목 없음)"
+                    url = n.get("url") or ""
+                    source = n.get("source") or ""
+                    date = n.get("date") or ""
+                    title_md = f"[{title}]({url})" if url else title
+                    st.markdown(
+                        f"- `{date}` {title_md}  <small>· _{source}_</small>",
+                        unsafe_allow_html=True,
+                    )
+        elif has_dart_or_naver:
+            with st.expander("📰 최근 종목 뉴스 — 0건"):
+                st.caption(
+                    f"제목에 **{r['name']}**(또는 단축형)이 직접 들어간 최근 기사를 찾지 못했습니다.  \n"
+                    "산업·시장 일반 뉴스는 노이즈가 많아 자동 제외됩니다. "
+                    "네이버 금융 종목뉴스 페이지에서 직접 확인하시려면 종목코드 검색을 활용하세요."
+                )
+
+        src = r.get("sources") or {}
+        if src:
+            with st.expander("ℹ️ 데이터 출처와 기준 시점"):
+                lines = []
+                if src.get("price_last_date"):
+                    lines.append(
+                        f"- **추세 / 모멘텀 / 거래량 / 가격 리스크** — "
+                        f"FinanceDataReader (KRX 일봉) · 마지막 거래일 `{src['price_last_date']}`"
+                    )
+                if src.get("flow_last_date"):
+                    lines.append(
+                        f"- **외국인·기관 수급** — 네이버 금융 (HTML 스크래핑) · "
+                        f"마지막 거래일 `{src['flow_last_date']}`"
+                    )
+                elif "수급" in [s["name"] for s in r["scores"]]:
+                    lines.append("- **외국인·기관 수급** — 네이버 금융 (조회 실패 또는 데이터 없음)")
+                if src.get("fin_report_label"):
+                    fresh_note = ""
+                    if is_stale:
+                        days_old = fresh.get("days_since_coverage", 0)
+                        next_exp = fresh.get("next_expected", "")
+                        fresh_note = (
+                            f"  \n  ⚠️ 회계기간 종료 후 **{days_old}일 경과** — "
+                            f"**{next_exp}보고서** 미제출 상태"
+                        )
+                    lines.append(
+                        f"- **가치 (PER/PBR) / 재무 건전성 / 성장성** — "
+                        f"DART OPEN API · `{src['fin_report_label']}` 기준"
+                        f"{fresh_note}"
+                    )
+                elif src.get("has_dart"):
+                    lines.append("- **재무 데이터** — DART (보고서 조회 실패)")
+                if src.get("has_dart") and disclosures:
+                    lines.append("- **공시 목록·분류** — DART OPEN API · 최근 30일 접수분 (Gemini 분류)")
+                if src.get("news_count"):
+                    lines.append(
+                        f"- **종목 뉴스** — 네이버 금융 종목뉴스 (HTML 스크래핑) · "
+                        f"최근 {src['news_count']}건 · 점수 영향 없음 (참고용)"
+                    )
+                if src.get("analyzed_at"):
+                    lines.append(f"- **이 분석을 실행한 시각** — `{src['analyzed_at']}`")
+                st.markdown("\n".join(lines))
+                st.caption(
+                    "⚠️ 네이버 금융 스크래핑은 약관상 회색지대입니다. "
+                    "본인 분석용으로만 사용하시고, 배포·상업화 단계에선 한투 OpenAPI 등 "
+                    "공식 데이터로 교체를 권장합니다."
+                )
+
+
+# 메인 영역
+focus_code = st.session_state.pop("_focus_code", None)
+analyze_favs_only = st.session_state.pop("_analyze_favs_only", False)
+screen_req = st.session_state.pop("_screen", None)
+auto_run = st.session_state.pop("_auto_run_analyze", False)
+
+results = None
+if screen_req:
+    universe = screen_req["universe"]
+    min_score = screen_req["min_score"]
+    use_lite = screen_req.get("lite", True)
+    codes = get_universe_codes(universe)
+    label = UNIVERSE_LABELS.get(universe, universe)
+    mode_label = "⚡ Lite" if use_lite else "🔬 Full"
+
+    st.subheader(f"🔍 발굴 결과 — {label} ({mode_label})")
+    if not codes:
+        st.error("유니버스 종목 목록을 가져오지 못했습니다.")
+    else:
+        progress = st.progress(0)
+        status = st.empty()
+        screened: list[dict] = []
+        errors = 0
+        # 병렬 처리: lite 모드는 5개, full 모드는 3개씩 동시 (Gemini 한도 고려)
+        max_workers = 5 if use_lite else 3
+        completed = 0
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(cached_analyze, c, use_lite): c for c in codes}
+            for future in as_completed(futures):
+                c = futures[future]
+                try:
+                    r = future.result()
+                    if not r.get("error"):
+                        screened.append(r)
+                    else:
+                        errors += 1
+                except Exception:
+                    errors += 1
+                completed += 1
+                progress.progress(completed / len(codes))
+                nm = stock_dict.get(c, c)
+                status.caption(f"분석 중 ({completed}/{len(codes)}): {nm} ({c})")
+
+        progress.empty()
+        status.empty()
+
+        # 종합점수 내림차순 + 최소 점수 필터
+        screened.sort(key=lambda r: r.get("total", -999), reverse=True)
+        results = [r for r in screened if r.get("total", -999) >= min_score]
+
+        mode_note = (
+            "⚡ Lite 모드 — 공시 본문·뉴스 미포함."
+            if use_lite
+            else "🔬 Full 모드 — LLM 공시 분석 + 뉴스 포함."
+        )
+        st.success(
+            f"✅ {len(codes)}개 분석 · {len(results)}개가 종합점수 ≥ {min_score:+d} 통과 "
+            f"(에러 {errors}건). {mode_note}"
+        )
+        st.session_state.results = results
+        if use_lite:
+            st.info(
+                "💡 더 자세히 보고 싶은 종목이 있으면 사이드바 ⭐로 즐겨찾기 → "
+                "종목명 클릭 시 LLM 공시 분석·뉴스까지 포함된 풀 분석이 돌아갑니다."
+            )
+
+elif focus_code:
+    name = stock_dict.get(focus_code, focus_code)
+    with st.spinner(f"{name} 분석 중..."):
+        results = [cached_analyze(focus_code)]
+        st.session_state.results = results
+    st.info(f"⭐ **{name}** 단독 분석 결과입니다. 워치리스트 전체를 보려면 **🔍 분석하기**를 누르세요.")
+elif analyze_favs_only:
+    favs = load_favorites()
+    if not favs:
+        st.warning("⭐ 즐겨찾기가 비어있습니다. 종목 카드의 ☆ 버튼으로 추가하세요.")
+    else:
+        with st.spinner(f"즐겨찾기 {len(favs)}개 분석 중..."):
+            results = [cached_analyze(c) for c in favs]
+            st.session_state.results = results
+        st.info(
+            f"⭐ 즐겨찾기 **{len(favs)}개**만 분석한 결과입니다. "
+            "워치리스트는 그대로이며, 워치리스트 전체를 보려면 **🔍 분석하기**를 누르세요."
+        )
+elif not selected_codes:
+    st.info("👈 사이드바에서 분석할 종목을 선택하세요.")
+elif run_analysis or auto_run:
+    with st.spinner("종목 데이터 수집 및 점수 계산 중..."):
+        results = [cached_analyze(c) for c in selected_codes]
+        st.session_state.results = results
+elif "results" in st.session_state:
+    results = st.session_state.results
+else:
+    st.info(f"선택된 종목: {len(selected_codes)}개. **분석하기** 버튼을 눌러 시작하세요.")
+
+if results:
+    if len(results) > 1:
+        st.subheader("📊 비교표")
+        render_summary_table(results)
+        st.divider()
+
+    st.subheader("📋 종목별 상세 분석")
+    favorites = load_favorites()
+    for r in results:
+        render_stock_card(r, favorites)

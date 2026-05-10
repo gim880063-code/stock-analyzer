@@ -1,0 +1,21 @@
+# 비밀 키 — 절대 커밋 금지
+.env
+.streamlit/secrets.toml
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+.venv*/
+
+# 캐시·로컬 데이터
+data/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
