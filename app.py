@@ -583,7 +583,7 @@ def cached_analyze(code: str, lite: bool = False) -> dict:
 
 
 # 분석 로직이 바뀔 때마다 이 버전을 올려서 기존 캐시를 무효화
-ANALYZER_VERSION = "v20-2026-05-10-preliminary-in-lite"
+ANALYZER_VERSION = "v21-2026-05-10-llm-retry-backoff"
 if st.session_state.get("_analyzer_cache_version") != ANALYZER_VERSION:
     cached_analyze.clear()
     st.session_state["_analyzer_cache_version"] = ANALYZER_VERSION

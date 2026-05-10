@@ -6,6 +6,8 @@ Gemini API 기반 공시 분석 모듈
 """
 import json
 import os
+import re
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -150,17 +152,38 @@ JSON 형식으로만 응답:
 }}"""
 
 
-def _safe_call(model: str, prompt: str) -> dict:
+def _safe_call(model: str, prompt: str, temperature: float = 0.2, max_retries: int = 3) -> dict:
+    """
+    LLM 호출 + 429 (rate limit) 자동 retry.
+    Gemini가 "retry in Xs" 힌트를 주면 그만큼 기다리고, 없으면 지수 백오프.
+    """
     client = _get_client()
-    response = client.models.generate_content(
-        model=model,
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-            temperature=0.2,
-        ),
-    )
-    return json.loads(response.text)
+    last_error: Exception | None = None
+    for attempt in range(max_retries):
+        try:
+            response = client.models.generate_content(
+                model=model,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    temperature=temperature,
+                ),
+            )
+            return json.loads(response.text)
+        except Exception as e:
+            last_error = e
+            err_str = str(e)
+            is_rate_limit = "429" in err_str or "RESOURCE_EXHAUSTED" in err_str
+            if not is_rate_limit or attempt >= max_retries - 1:
+                raise
+            # 권장 retry 시간 파싱 (예: "retry in 29.1s")
+            m = re.search(r"retry in (\d+(?:\.\d+)?)s", err_str)
+            wait = float(m.group(1)) + 1 if m else (2 ** (attempt + 1))
+            wait = min(wait, 30.0)
+            time.sleep(wait)
+    if last_error:
+        raise last_error
+    raise RuntimeError("LLM call failed without exception (impossible)")
 
 
 BATCH_CLASSIFY_PROMPT = """다음 한국 주식 DART 공시 목록을 각각 분류하세요.
@@ -217,16 +240,7 @@ def classify_titles_batch(disclosures: list[dict]) -> list[dict]:
                     f"날짜: {d.get('date', '')}"
                 )
             prompt = BATCH_CLASSIFY_PROMPT.format(disclosures_text="\n".join(text_lines))
-
-            response = _get_client().models.generate_content(
-                model=FLASH_MODEL,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    temperature=0.2,
-                ),
-            )
-            batch_response = json.loads(response.text)
+            batch_response = _safe_call(FLASH_MODEL, prompt, temperature=0.2)
 
             # 응답 파싱 + 개별 캐시 저장
             for item in batch_response:
@@ -344,15 +358,7 @@ def extract_preliminary_results(rcept_no: str, title: str, content: str) -> dict
         title=title or "", content=(content or "")[:6000],
     )
     try:
-        response = _get_client().models.generate_content(
-            model=FLASH_MODEL,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                temperature=0.1,
-            ),
-        )
-        result = json.loads(response.text)
+        result = _safe_call(FLASH_MODEL, prompt, temperature=0.1)
     except Exception:
         return None
 
