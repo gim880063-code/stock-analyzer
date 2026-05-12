@@ -17,6 +17,7 @@ import llm
 import portfolio as port
 import history as hist_module
 import cloud_store
+import scouted
 
 
 DEFAULT_WATCHLIST = ["005930", "000660", "035420"]
@@ -312,6 +313,99 @@ with st.sidebar:
             port.add_holding(code, port_qty, port_price)
             st.success(f"{stock_dict.get(code, code)} 저장됨")
             st.rerun()
+
+    # ─────────── 발굴 추적 ───────────
+    st.divider()
+    st.subheader("📌 발굴 추적")
+    scouted_items = scouted.load_scouted()
+
+    if not scouted_items:
+        st.caption(
+            "스크리닝 후 '📌 모두 발굴 추적에 추가' 버튼으로 모을 수 있어요. "
+            "매일 점수 변화 + 안전 유니버스 이탈을 추적합니다."
+        )
+    else:
+        # 안전 유니버스 멤버십 확인 (현재 시점)
+        try:
+            safe_codes = set(get_universe_codes("safe"))
+        except Exception:
+            safe_codes = set()
+
+        # 최근 점수 추세를 위한 전체 히스토리 (1회 fetch)
+        all_history = hist_module._load()
+
+        # 통계 요약
+        dropped = sum(1 for c in scouted_items if c not in safe_codes)
+        if dropped > 0:
+            st.warning(f"⚠️ 안전 유니버스에서 이탈한 종목 {dropped}개")
+
+        # 추가일 기준 최신순
+        sorted_codes = sorted(
+            scouted_items.keys(),
+            key=lambda c: scouted_items[c].get("added_at", ""),
+            reverse=True,
+        )
+
+        for code in sorted_codes:
+            meta = scouted_items[code]
+            name = stock_dict.get(code, "?")
+            in_universe = code in safe_codes
+
+            entries = all_history.get(code, [])
+            latest_score = entries[-1]["total"] if entries else None
+            prev_score = entries[-2]["total"] if len(entries) >= 2 else None
+            delta = (latest_score - prev_score) if (
+                latest_score is not None and prev_score is not None
+            ) else None
+
+            with st.container(border=True):
+                col_main, col_x = st.columns([5, 1])
+                with col_main:
+                    drop_mark = "" if in_universe else " ⚠️"
+                    if st.button(
+                        f"📌 {name} ({code}){drop_mark}",
+                        key=f"scout_btn_{code}",
+                        use_container_width=True,
+                        help=f"{name} 단독 분석",
+                    ):
+                        st.session_state["_focus_code"] = code
+                        st.rerun()
+
+                    # 점수 표시
+                    if latest_score is not None:
+                        score_part = f"<b>{latest_score:+d}점</b>"
+                        if delta is not None:
+                            if delta > 0:
+                                score_part += f" <span style='color:#1f7a3a'>↗{delta:+d}</span>"
+                            elif delta < 0:
+                                score_part += f" <span style='color:#a3201a'>↘{delta:+d}</span>"
+                            else:
+                                score_part += " <span style='color:#666'>→</span>"
+                    else:
+                        score_part = "<span style='color:#666'>점수 미분석</span>"
+
+                    # 상태 표시
+                    if in_universe:
+                        status = "<span style='color:#1f7a3a'>✅ 유니버스 내</span>"
+                    else:
+                        status = "<span style='color:#a3201a;font-weight:600'>⚠️ 유니버스 이탈</span>"
+
+                    added_at = meta.get("added_at", "?")
+                    added_score = meta.get("added_score", 0)
+                    st.markdown(
+                        f"<small>{score_part} · {status}<br>"
+                        f"추가 {added_at} (당시 {added_score:+d}점)</small>",
+                        unsafe_allow_html=True,
+                    )
+                with col_x:
+                    if st.button("✖", key=f"unscout_{code}", help="추적 해제"):
+                        scouted.remove(code)
+                        st.rerun()
+
+        st.caption(
+            f"총 {len(scouted_items)}개 추적 중 · 점수는 마지막 분석 결과 기준 · "
+            "최신 데이터 갱신은 '📌' 클릭해 단독 분석"
+        )
 
     st.divider()
     st.subheader("🔍 종목 발굴 (스크리닝)")
@@ -1194,6 +1288,32 @@ if screen_req:
                 msg += f", {excluded_stale}개 제외 — 재무 stale + 잠정실적 미발표"
             msg += f"). {mode_note}"
             st.success(msg)
+
+            # 📌 발굴 추적 추가 버튼
+            col_add, col_info = st.columns([1, 2])
+            with col_add:
+                if st.button(
+                    f"📌 {len(results)}개 모두 발굴 추적에 추가",
+                    use_container_width=True,
+                    key="scout_add_all",
+                    type="primary",
+                ):
+                    items = [(r["code"], r.get("total", 0)) for r in results]
+                    added = scouted.add_many(items, universe=universe)
+                    if added > 0:
+                        st.success(
+                            f"✅ {added}개 새로 추가됨 "
+                            f"(이미 추적 중인 {len(items) - added}개는 건너뜀). "
+                            "사이드바 '📌 발굴 추적'에서 추이 확인."
+                        )
+                    else:
+                        st.info("이미 모두 추적 중입니다.")
+                    st.rerun()
+            with col_info:
+                st.caption(
+                    "발굴 추적에 넣으면 매일 점수 변화 + 안전 유니버스 이탈 자동 감지"
+                )
+
             if use_lite:
                 st.info(
                     "💡 더 자세히 보고 싶은 종목이 있으면 사이드바 ⭐로 즐겨찾기 → "
