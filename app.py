@@ -292,9 +292,10 @@ with st.sidebar:
         st.caption("아래에서 보유 종목을 등록하세요")
 
     with st.expander("➕ 보유 종목 추가/수정"):
-        port_options = [f"{c} {n}" for c, n in sorted(stock_dict.items())]
+        # 한글 이름이 먼저 → 가나다 순 정렬 → 검색창에 "삼성" 같은 한글 입력으로 빠르게 필터
+        port_options = [f"{n} {c}" for c, n in sorted(stock_dict.items(), key=lambda kv: kv[1])]
         port_sel = st.selectbox(
-            "종목 선택",
+            "종목 검색 (한글 이름 또는 코드)",
             options=port_options,
             key="port_add_select",
             index=0,
@@ -306,7 +307,8 @@ with st.sidebar:
             "평균 매수가 (원)", min_value=1, step=100, value=10000, key="port_add_price",
         )
         if st.button("저장", key="port_add_save", use_container_width=True):
-            code = port_sel.split(maxsplit=1)[0]
+            # "삼성전자 005930" 형식 → 마지막 토큰이 6자리 코드
+            code = port_sel.rsplit(maxsplit=1)[-1]
             port.add_holding(code, port_qty, port_price)
             st.success(f"{stock_dict.get(code, code)} 저장됨")
             st.rerun()
