@@ -1117,11 +1117,99 @@ def render_stock_card(r: dict, favorites: list[str]) -> None:
 if st.session_state.get("_view_mode") == "screening_history":
     st.subheader("📌 최근 스크리닝 후보 (90일 누적)")
 
-    if st.button("← 분석 화면으로 돌아가기", key="back_to_analysis"):
-        st.session_state.pop("_view_mode", None)
-        st.rerun()
+    nav_back, nav_refresh = st.columns([1, 1])
+    with nav_back:
+        if st.button("← 분석 화면으로 돌아가기", key="back_to_analysis", use_container_width=True):
+            st.session_state.pop("_view_mode", None)
+            st.rerun()
 
     recent_picks = screening_history.get_recent(days=90)
+    if recent_picks:
+        with nav_refresh:
+            if st.button(
+                f"🔄 모두 다시 분석 ({len(recent_picks)}개 점수 업데이트)",
+                key="refresh_picks_btn",
+                use_container_width=True,
+                type="primary",
+                help="오늘 시세·재무·공시로 추적 중인 종목 모두 풀 분석. ~분 단위 소요.",
+            ):
+                st.session_state["_run_refresh_picks"] = True
+                st.rerun()
+
+    # 추적 종목 다시 분석 (사용자가 위 버튼 누른 경우)
+    if st.session_state.pop("_run_refresh_picks", False) and recent_picks:
+        codes_to_refresh = list(recent_picks.keys())
+        n_codes = len(codes_to_refresh)
+
+        # 캐시 초기화 — 진짜 fresh 데이터 받게
+        cached_analyze.clear()
+
+        from analyzer import (
+            enrich_with_deep_analysis,
+            recompute_score_after_deep,
+        )
+
+        st.caption(f"1단계: {n_codes}개 종목 재분석")
+        p1 = st.progress(0)
+        s1 = st.empty()
+        refreshed: list[dict] = []
+        errs = 0
+
+        # 히스토리 배치 — 한 번에 저장
+        hist_module.begin_batch()
+        try:
+            with ThreadPoolExecutor(max_workers=3) as ex:
+                futs = {ex.submit(cached_analyze, c, False, 0): c for c in codes_to_refresh}
+                done = 0
+                for f in as_completed(futs):
+                    c = futs[f]
+                    try:
+                        r = f.result()
+                        if not r.get("error"):
+                            refreshed.append(r)
+                        else:
+                            errs += 1
+                    except Exception:
+                        errs += 1
+                    done += 1
+                    p1.progress(done / n_codes)
+                    s1.caption(f"{done}/{n_codes}: {stock_dict.get(c, c)} ({c})")
+
+            # 2단계: 깊이 분석 + 점수 재계산
+            if refreshed:
+                s1.caption(f"2단계: {len(refreshed)}개 정밀 분석 중")
+                p2 = st.progress(0)
+
+                def _enrich(r):
+                    enrich_with_deep_analysis(r, top_n=3)
+                    recompute_score_after_deep(r)
+
+                with ThreadPoolExecutor(max_workers=3) as dex:
+                    dfuts = {dex.submit(_enrich, r): r for r in refreshed}
+                    d_done = 0
+                    for f in as_completed(dfuts):
+                        try:
+                            f.result()
+                        except Exception:
+                            pass
+                        d_done += 1
+                        p2.progress(d_done / len(refreshed))
+                p2.empty()
+        finally:
+            try:
+                hist_module.commit_batch()
+            except Exception:
+                pass
+
+        p1.empty()
+        s1.empty()
+        st.success(
+            f"✅ {len(refreshed)}개 점수 업데이트 완료 "
+            f"(에러 {errs}건). 표가 새 점수로 갱신됐습니다."
+        )
+        # 표 그리기 위해 recent_picks 다시 로드 (record_snapshot이 score_history 갱신했음)
+        recent_picks = screening_history.get_recent(days=90)
+
     if not recent_picks:
         st.info("아직 누적된 스크리닝 결과가 없습니다. 사이드바 '🔍 발굴 시작' 눌러주세요.")
     else:
