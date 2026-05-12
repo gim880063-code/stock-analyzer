@@ -175,11 +175,6 @@ with st.sidebar:
             "✅ Gist 영구 저장소 연결됨\n\n"
             "포트폴리오·점수 히스토리·즐겨찾기·워치리스트가 클라우드 재배포 후에도 유지됩니다."
         )
-        sync_log = cloud_store.get_sync_log()
-        if sync_log:
-            with st.expander(f"🔧 Gist 동기화 로그 (최근 {len(sync_log)}건)"):
-                for entry in reversed(sync_log):
-                    st.code(entry, language=None)
     else:
         st.info(
             "ℹ️ Gist 미설정 — 로컬 파일에만 저장 "
