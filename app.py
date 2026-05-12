@@ -17,7 +17,7 @@ import llm
 import portfolio as port
 import history as hist_module
 import cloud_store
-import scouted
+import screening_history
 
 
 DEFAULT_WATCHLIST = ["005930", "000660", "035420"]
@@ -314,18 +314,18 @@ with st.sidebar:
             st.success(f"{stock_dict.get(code, code)} 저장됨")
             st.rerun()
 
-    # ─────────── 발굴 추적 ───────────
+    # ─────────── 스크리닝 히스토리 ───────────
     st.divider()
-    st.subheader("📌 발굴 추적")
-    scouted_items = scouted.load_scouted()
+    st.subheader("📌 최근 스크리닝 후보")
 
-    if not scouted_items:
+    recent_picks = screening_history.get_recent(days=14)
+    if not recent_picks:
         st.caption(
-            "스크리닝 후 '📌 모두 발굴 추적에 추가' 버튼으로 모을 수 있어요. "
-            "매일 점수 변화 + 안전 유니버스 이탈을 추적합니다."
+            "스크리닝 돌리면 통과 종목이 자동으로 여기 쌓입니다 (14일 보관). "
+            "매일 점수 변화·주가 추이·안전 유니버스 이탈을 자동 추적."
         )
     else:
-        # 안전 유니버스 멤버십 확인 (현재 시점)
+        # 현재 안전 유니버스 멤버십 확인
         try:
             safe_codes = set(get_universe_codes("safe"))
         except Exception:
@@ -333,78 +333,113 @@ with st.sidebar:
 
         # 최근 점수 추세를 위한 전체 히스토리 (1회 fetch)
         all_history = hist_module._load()
+        latest_date = next(iter(recent_picks.values())).get("latest_date", "")
 
         # 통계 요약
-        dropped = sum(1 for c in scouted_items if c not in safe_codes)
-        if dropped > 0:
-            st.warning(f"⚠️ 안전 유니버스에서 이탈한 종목 {dropped}개")
+        dropped_from_screen = sum(1 for m in recent_picks.values() if not m["in_latest"])
+        dropped_from_uni = sum(1 for c in recent_picks if c not in safe_codes)
+        if dropped_from_screen > 0 or dropped_from_uni > 0:
+            parts = []
+            if dropped_from_screen > 0:
+                parts.append(f"최근 스크리닝 탈락 {dropped_from_screen}개")
+            if dropped_from_uni > 0:
+                parts.append(f"안전 유니버스 이탈 {dropped_from_uni}개")
+            st.warning("⚠️ " + " · ".join(parts))
 
-        # 추가일 기준 최신순
+        # 정렬: (1) 최근 등장 종목 우선, (2) 등장 횟수 많은 순, (3) 첫 등장일
         sorted_codes = sorted(
-            scouted_items.keys(),
-            key=lambda c: scouted_items[c].get("added_at", ""),
-            reverse=True,
+            recent_picks.keys(),
+            key=lambda c: (
+                0 if recent_picks[c]["in_latest"] else 1,
+                -recent_picks[c]["count"],
+                recent_picks[c]["first_seen"],
+            ),
         )
 
         for code in sorted_codes:
-            meta = scouted_items[code]
+            meta = recent_picks[code]
             name = stock_dict.get(code, "?")
             in_universe = code in safe_codes
+            in_latest = meta["in_latest"]
 
             entries = all_history.get(code, [])
             latest_score = entries[-1]["total"] if entries else None
+            latest_close = entries[-1].get("close") if entries else None
             prev_score = entries[-2]["total"] if len(entries) >= 2 else None
-            delta = (latest_score - prev_score) if (
+            prev_close = entries[-2].get("close") if len(entries) >= 2 else None
+            score_delta = (latest_score - prev_score) if (
                 latest_score is not None and prev_score is not None
             ) else None
+            price_delta_pct = (
+                (latest_close / prev_close - 1) * 100
+                if latest_close and prev_close
+                else None
+            )
 
             with st.container(border=True):
-                col_main, col_x = st.columns([5, 1])
-                with col_main:
-                    drop_mark = "" if in_universe else " ⚠️"
-                    if st.button(
-                        f"📌 {name} ({code}){drop_mark}",
-                        key=f"scout_btn_{code}",
-                        use_container_width=True,
-                        help=f"{name} 단독 분석",
-                    ):
-                        st.session_state["_focus_code"] = code
-                        st.rerun()
+                # 헤더: 종목명 + 상태 마크
+                marks = []
+                if not in_latest:
+                    marks.append("⚠️탈락")
+                if not in_universe:
+                    marks.append("⚠️유니버스이탈")
+                mark_str = (" " + " ".join(marks)) if marks else ""
 
-                    # 점수 표시
-                    if latest_score is not None:
-                        score_part = f"<b>{latest_score:+d}점</b>"
-                        if delta is not None:
-                            if delta > 0:
-                                score_part += f" <span style='color:#1f7a3a'>↗{delta:+d}</span>"
-                            elif delta < 0:
-                                score_part += f" <span style='color:#a3201a'>↘{delta:+d}</span>"
-                            else:
-                                score_part += " <span style='color:#666'>→</span>"
-                    else:
-                        score_part = "<span style='color:#666'>점수 미분석</span>"
+                if st.button(
+                    f"📌 {name} ({code}){mark_str}",
+                    key=f"hist_btn_{code}",
+                    use_container_width=True,
+                    help=f"{name} 단독 분석",
+                ):
+                    st.session_state["_focus_code"] = code
+                    st.rerun()
 
-                    # 상태 표시
-                    if in_universe:
-                        status = "<span style='color:#1f7a3a'>✅ 유니버스 내</span>"
-                    else:
-                        status = "<span style='color:#a3201a;font-weight:600'>⚠️ 유니버스 이탈</span>"
+                # 점수 + 주가 한 줄
+                lines = []
+                if latest_score is not None:
+                    score_part = f"<b>{latest_score:+d}점</b>"
+                    if score_delta is not None:
+                        if score_delta > 0:
+                            score_part += f" <span style='color:#1f7a3a'>↗{score_delta:+d}</span>"
+                        elif score_delta < 0:
+                            score_part += f" <span style='color:#a3201a'>↘{score_delta:+d}</span>"
+                        else:
+                            score_part += " <span style='color:#666'>→</span>"
+                    lines.append(score_part)
 
-                    added_at = meta.get("added_at", "?")
-                    added_score = meta.get("added_score", 0)
-                    st.markdown(
-                        f"<small>{score_part} · {status}<br>"
-                        f"추가 {added_at} (당시 {added_score:+d}점)</small>",
-                        unsafe_allow_html=True,
-                    )
-                with col_x:
-                    if st.button("✖", key=f"unscout_{code}", help="추적 해제"):
-                        scouted.remove(code)
-                        st.rerun()
+                if latest_close is not None:
+                    price_part = f"{latest_close:,.0f}원"
+                    if price_delta_pct is not None:
+                        if price_delta_pct > 0:
+                            price_part += f" <span style='color:#1f7a3a'>+{price_delta_pct:.1f}%</span>"
+                        elif price_delta_pct < 0:
+                            price_part += f" <span style='color:#a3201a'>{price_delta_pct:.1f}%</span>"
+                    lines.append(price_part)
+
+                line1 = " · ".join(lines) if lines else "<span style='color:#666'>분석 데이터 없음</span>"
+
+                # 두 번째 라인: 등장 정보 + 유니버스 상태
+                uni_status = (
+                    "<span style='color:#1f7a3a'>✅ 유니버스 내</span>"
+                    if in_universe
+                    else "<span style='color:#a3201a;font-weight:600'>⚠️ 유니버스 이탈</span>"
+                )
+                latest_status = (
+                    f"<span style='color:#1f7a3a'>{latest_date} 등장</span>"
+                    if in_latest
+                    else f"<span style='color:#a3201a'>마지막 {meta['last_seen']}</span>"
+                )
+
+                st.markdown(
+                    f"<small>{line1}<br>"
+                    f"{uni_status} · {latest_status} · {meta['count']}회 등장 (첫 {meta['first_seen']})"
+                    f"</small>",
+                    unsafe_allow_html=True,
+                )
 
         st.caption(
-            f"총 {len(scouted_items)}개 추적 중 · 점수는 마지막 분석 결과 기준 · "
-            "최신 데이터 갱신은 '📌' 클릭해 단독 분석"
+            f"최근 14일 누적 {len(recent_picks)}개 · "
+            f"마지막 스크리닝: {latest_date}"
         )
 
     st.divider()
@@ -1271,6 +1306,12 @@ if screen_req:
                     deep_progress.progress(deep_done / len(results))
             deep_progress.empty()
 
+            # 스크리닝 히스토리 자동 저장 — 사이드바 '최근 스크리닝 후보'에 누적
+            try:
+                screening_history.record_today([r["code"] for r in results])
+            except Exception:
+                pass
+
         if results:
             # 정상: 통과 종목 있음
             msg = (
@@ -1281,31 +1322,10 @@ if screen_req:
                 msg += f", {excluded_stale}개 제외 — 재무 stale + 잠정실적 미발표"
             msg += ")."
             st.success(msg)
-
-            # 📌 발굴 추적 추가 버튼
-            col_add, col_info = st.columns([1, 2])
-            with col_add:
-                if st.button(
-                    f"📌 {len(results)}개 모두 발굴 추적에 추가",
-                    use_container_width=True,
-                    key="scout_add_all",
-                    type="primary",
-                ):
-                    items = [(r["code"], r.get("total", 0)) for r in results]
-                    added = scouted.add_many(items, universe=universe)
-                    if added > 0:
-                        st.success(
-                            f"✅ {added}개 새로 추가됨 "
-                            f"(이미 추적 중인 {len(items) - added}개는 건너뜀). "
-                            "사이드바 '📌 발굴 추적'에서 추이 확인."
-                        )
-                    else:
-                        st.info("이미 모두 추적 중입니다.")
-                    st.rerun()
-            with col_info:
-                st.caption(
-                    "발굴 추적에 넣으면 매일 점수 변화 + 안전 유니버스 이탈 자동 감지"
-                )
+            st.info(
+                f"📌 통과 {len(results)}개 종목이 사이드바 **'최근 스크리닝 후보'** 에 "
+                "자동 추가됐습니다. 매일 스크리닝하면 점수 변화·주가 추이·이탈이 추적돼요."
+            )
 
         else:
             # 빈 결과 — 명확히 안내 + 원인 설명 + 다음 액션 제안
