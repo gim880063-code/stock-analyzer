@@ -66,7 +66,7 @@ def get_history(code: str, days: int = 30) -> list[dict]:
     return [e for e in _load().get(code, []) if e.get("date", "") >= cutoff]
 
 
-def compute_trend(code: str, days: int = 14) -> dict | None:
+def compute_trend(code: str, days: int = 30) -> dict | None:
     """최근 N일 점수 변화 요약. 데이터 2건 미만이면 None."""
     history = get_history(code, days=days)
     if len(history) < 2:

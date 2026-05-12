@@ -962,15 +962,15 @@ def render_stock_card(r: dict, favorites: list[str]) -> None:
             st.markdown("**최근 120일 종가 / 20일선 / 60일선**")
             st.line_chart(hist, height=240)
 
-        # 점수 히스토리 (14일 추세)
-        score_hist = hist_module.get_history(r["code"], days=14)
+        # 점수 히스토리 (30일 추세)
+        score_hist = hist_module.get_history(r["code"], days=30)
         if len(score_hist) >= 2:
-            st.markdown("**📊 최근 14일 종합점수 추세**")
+            st.markdown("**📊 최근 30일 종합점수 추세**")
             sh_df = pd.DataFrame(score_hist).set_index("date")[["total"]].rename(
                 columns={"total": "종합점수"}
             )
             st.line_chart(sh_df, height=160)
-            trend = hist_module.compute_trend(r["code"], days=14)
+            trend = hist_module.compute_trend(r["code"], days=30)
             if trend:
                 delta = trend["delta"]
                 if delta > 0:
