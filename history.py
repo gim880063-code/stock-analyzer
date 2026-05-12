@@ -1,7 +1,7 @@
 """
-점수 히스토리 — 매일 분석 결과 자동 저장 + 14일 추세 계산.
+점수 히스토리 — 매일 분석 결과 자동 저장 + 30일 추세 계산.
 
-저장 위치: data/score_history.json
+저장 위치: Gist (설정 시) + 로컬 data/score_history.json
 형식:
   {
     "005930": [
@@ -13,32 +13,22 @@
 같은 날 다시 분석하면 덮어씀 (마지막 분석값 유지).
 90일 이전 데이터는 자동 제거.
 """
-import json
 from datetime import datetime, timedelta
-from pathlib import Path
+
+import cloud_store
 
 
-HISTORY_FILE = Path(__file__).parent / "data" / "score_history.json"
+FILENAME = "score_history.json"
 RETENTION_DAYS = 90
 
 
 def _load() -> dict[str, list[dict]]:
-    if HISTORY_FILE.exists():
-        try:
-            data = json.loads(HISTORY_FILE.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                return data
-        except json.JSONDecodeError:
-            pass
-    return {}
+    data = cloud_store.load(FILENAME, {})
+    return data if isinstance(data, dict) else {}
 
 
 def _save(history: dict[str, list[dict]]) -> None:
-    HISTORY_FILE.parent.mkdir(exist_ok=True)
-    HISTORY_FILE.write_text(
-        json.dumps(history, ensure_ascii=False, separators=(",", ":")),
-        encoding="utf-8",
-    )
+    cloud_store.save(FILENAME, history)
 
 
 def record_snapshot(code: str, total: int, close: float, opinion: str) -> None:

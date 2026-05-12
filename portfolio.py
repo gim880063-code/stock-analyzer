@@ -1,38 +1,28 @@
 """
 포트폴리오 추적 — 보유 종목·수량·평균매수가 관리.
 
-저장 위치: data/portfolio.json
+저장 위치: Gist (설정 시) + 로컬 data/portfolio.json
 형식:
   {
     "005930": {"quantity": 100, "avg_price": 250000, "added_at": "2026-05-10"},
     ...
   }
 """
-import json
 from datetime import datetime
-from pathlib import Path
+
+import cloud_store
 
 
-PORTFOLIO_FILE = Path(__file__).parent / "data" / "portfolio.json"
+FILENAME = "portfolio.json"
 
 
 def load_portfolio() -> dict[str, dict]:
-    if PORTFOLIO_FILE.exists():
-        try:
-            data = json.loads(PORTFOLIO_FILE.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                return data
-        except json.JSONDecodeError:
-            pass
-    return {}
+    data = cloud_store.load(FILENAME, {})
+    return data if isinstance(data, dict) else {}
 
 
 def save_portfolio(portfolio: dict[str, dict]) -> None:
-    PORTFOLIO_FILE.parent.mkdir(exist_ok=True)
-    PORTFOLIO_FILE.write_text(
-        json.dumps(portfolio, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    cloud_store.save(FILENAME, portfolio)
 
 
 def add_holding(code: str, quantity: int, avg_price: float) -> None:

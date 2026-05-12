@@ -16,44 +16,38 @@ import dart
 import llm
 import portfolio as port
 import history as hist_module
+import cloud_store
 
 
-WATCHLIST_FILE = Path(__file__).parent / "data" / "watchlist.json"
-FAVORITES_FILE = Path(__file__).parent / "data" / "favorites.json"
 DEFAULT_WATCHLIST = ["005930", "000660", "035420"]
 
 
-def _load_str_list(path: Path) -> list[str]:
-    if path.exists():
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(data, list) and all(isinstance(x, str) for x in data):
-                return data
-        except json.JSONDecodeError:
-            pass
+def _load_str_list(filename: str) -> list[str]:
+    data = cloud_store.load(filename, [])
+    if isinstance(data, list) and all(isinstance(x, str) for x in data):
+        return data
     return []
 
 
-def _save_str_list(path: Path, items: list[str]) -> None:
-    path.parent.mkdir(exist_ok=True)
-    path.write_text(json.dumps(items, ensure_ascii=False), encoding="utf-8")
+def _save_str_list(filename: str, items: list[str]) -> None:
+    cloud_store.save(filename, items)
 
 
 def load_watchlist() -> list[str]:
-    items = _load_str_list(WATCHLIST_FILE)
+    items = _load_str_list("watchlist.json")
     return items if items else DEFAULT_WATCHLIST.copy()
 
 
 def save_watchlist(codes: list[str]) -> None:
-    _save_str_list(WATCHLIST_FILE, codes)
+    _save_str_list("watchlist.json", codes)
 
 
 def load_favorites() -> list[str]:
-    return _load_str_list(FAVORITES_FILE)
+    return _load_str_list("favorites.json")
 
 
 def save_favorites(codes: list[str]) -> None:
-    _save_str_list(FAVORITES_FILE, codes)
+    _save_str_list("favorites.json", codes)
 
 
 def toggle_favorite(code: str) -> None:
@@ -175,6 +169,18 @@ with st.sidebar:
         st.success("✅ Gemini API 키 연결됨\n\n공시 자동 분류·요약 활성화")
     else:
         st.info("ℹ️ Gemini API 키 미설정 — 공시는 룰 기반 분류만 동작 (`GEMINI_API_KEY`)")
+
+    if cloud_store.is_configured():
+        st.success(
+            "✅ Gist 영구 저장소 연결됨\n\n"
+            "포트폴리오·점수 히스토리·즐겨찾기·워치리스트가 클라우드 재배포 후에도 유지됩니다."
+        )
+    else:
+        st.info(
+            "ℹ️ Gist 미설정 — 로컬 파일에만 저장 "
+            "(Streamlit Cloud 재배포 시 데이터 초기화됨). "
+            "secrets에 `GITHUB_PAT` + `GIST_ID` 추가 시 영구 저장."
+        )
 
     st.divider()
     st.subheader("⭐ 즐겨찾기")
@@ -671,7 +677,7 @@ def cached_analyze(code: str, lite: bool = False) -> dict:
 
 
 # 분석 로직이 바뀔 때마다 이 버전을 올려서 기존 캐시를 무효화
-ANALYZER_VERSION = "v23-2026-05-10-portfolio-history"
+ANALYZER_VERSION = "v24-2026-05-10-gist-storage"
 if st.session_state.get("_analyzer_cache_version") != ANALYZER_VERSION:
     cached_analyze.clear()
     st.session_state["_analyzer_cache_version"] = ANALYZER_VERSION
