@@ -101,18 +101,34 @@ def get_corp_code(stock_code: str) -> str:
     return mapping[stock_code]
 
 
-def _api_get(path: str, params: dict[str, Any]) -> dict:
+def _api_get(path: str, params: dict[str, Any], max_retries: int = 2) -> dict:
     key = _get_api_key()
     if not key:
         raise DartError("DART_API_KEY가 설정되지 않았습니다.")
     params = {"crtfc_key": key, **params}
-    resp = requests.get(f"{BASE_URL}/{path}", params=params, timeout=20)
-    resp.raise_for_status()
-    data = resp.json()
-    status = data.get("status")
-    if status not in ("000", "013"):
-        raise DartError(f"DART {path} 오류 [{status}]: {data.get('message')}")
-    return data
+    import time
+    last_exc: Exception | None = None
+    for attempt in range(max_retries + 1):
+        try:
+            resp = requests.get(f"{BASE_URL}/{path}", params=params, timeout=20)
+            resp.raise_for_status()
+            data = resp.json()
+            status = data.get("status")
+            if status not in ("000", "013"):
+                raise DartError(f"DART {path} 오류 [{status}]: {data.get('message')}")
+            return data
+        except (requests.ConnectionError, requests.Timeout, requests.HTTPError) as e:
+            last_exc = e
+            if attempt < max_retries:
+                time.sleep(3 + attempt * 2)  # 3s, 5s
+                continue
+            raise DartError(f"DART {path} 연결 실패 (재시도 {max_retries}회 후)") from e
+        except DartError:
+            raise
+    # unreachable
+    if last_exc:
+        raise last_exc
+    raise DartError(f"DART {path} 실패 (원인 불명)")
 
 
 def _latest_report_codes() -> list[tuple[int, str]]:

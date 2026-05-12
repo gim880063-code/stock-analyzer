@@ -1338,15 +1338,20 @@ if screen_req:
         results = [r for r in fresh_results if r.get("total", -999) >= min_score]
         excluded_score = len(fresh_results) - len(results)
 
-        # 2단계: 통과 종목들에 깊이 분석 추가 (LLM rationale + key_points)
+        # 2단계: 통과 종목들에 깊이 분석 추가 + 점수 재계산
+        pre_deep_count = len(results)
         if results:
-            from analyzer import enrich_with_deep_analysis
+            from analyzer import enrich_with_deep_analysis, recompute_score_after_deep
             st.caption(f"2단계: 통과 {len(results)}개 종목 정밀 분석 중...")
             deep_progress = st.progress(0)
+
+            def _enrich_and_recompute(r: dict) -> None:
+                enrich_with_deep_analysis(r, top_n=3)
+                recompute_score_after_deep(r)
+
             with ThreadPoolExecutor(max_workers=3) as deep_exec:
                 deep_futures = {
-                    deep_exec.submit(enrich_with_deep_analysis, r, 3): r
-                    for r in results
+                    deep_exec.submit(_enrich_and_recompute, r): r for r in results
                 }
                 deep_done = 0
                 for future in as_completed(deep_futures):
@@ -1358,25 +1363,34 @@ if screen_req:
                     deep_progress.progress(deep_done / len(results))
             deep_progress.empty()
 
-            # 스크리닝 히스토리 자동 저장 — 사이드바 '최근 스크리닝 후보'에 누적
+            # 깊이 분석 결과로 점수가 떨어진 종목 제거 (재필터)
+            results = [r for r in results if r.get("total", -999) >= min_score]
+            results.sort(key=lambda r: r.get("total", -999), reverse=True)
+            dropped_after_deep = pre_deep_count - len(results)
+
+            # 스크리닝 히스토리 자동 저장 — 깊이 분석 후 통과 종목만
             try:
                 screening_history.record_today([r["code"] for r in results])
             except Exception:
                 pass
+        else:
+            dropped_after_deep = 0
 
         if results:
             # 정상: 통과 종목 있음
             msg = (
-                f"✅ {len(codes)}개 1차 분석 · **{len(results)}개 통과** + 정밀 분석 완료 "
+                f"✅ {len(codes)}개 1차 분석 · **{len(results)}개 최종 통과** "
                 f"(점수 ≥ {min_score:+d}, 에러 {errors}건"
             )
             if excluded_stale > 0:
-                msg += f", {excluded_stale}개 제외 — 재무 stale + 잠정실적 미발표"
+                msg += f", stale 제외 {excluded_stale}"
+            if dropped_after_deep > 0:
+                msg += f", 정밀 분석 후 탈락 {dropped_after_deep}"
             msg += ")."
             st.success(msg)
             st.info(
-                f"📌 통과 {len(results)}개 종목이 사이드바 **'최근 스크리닝 후보'** 에 "
-                "자동 추가됐습니다. 매일 스크리닝하면 점수 변화·주가 추이·이탈이 추적돼요."
+                f"📌 최종 통과 {len(results)}개가 사이드바 **'최근 스크리닝 후보'** 에 "
+                "자동 추가됐습니다. 매일 돌리면 점수 변화·주가 추이·이탈이 추적돼요."
             )
 
         else:
@@ -1401,6 +1415,10 @@ if screen_req:
                 lines.append(
                     f"- 점수 {min_score:+d}점 미만으로 탈락: **{excluded_score}개**"
                 )
+                if dropped_after_deep > 0:
+                    lines.append(
+                        f"- 정밀 분석 후 점수 미달로 추가 탈락: **{dropped_after_deep}개**"
+                    )
                 if top_score is not None:
                     lines.append(f"- 통과 후보 중 최고 점수: **{top_score:+d}점**")
                 st.markdown("\n".join(lines))

@@ -508,6 +508,52 @@ def score_risk(df: pd.DataFrame) -> ScoreItem:
     return {"name": "가격 리스크", "score": score, "msg": msg, "max": 0}
 
 
+def recompute_score_after_deep(result: dict) -> None:
+    """
+    깊이 분석이 공시 카테고리를 바꿨을 수 있으니 종합점수·의견을 재계산.
+    예: 제목만 보면 'negative' (유상증자결정) → 본문 보면 'positive' (신사업 투자).
+    """
+    disclosures = result.get("disclosures") or []
+    cats = [d.get("category", "neutral") for d in disclosures]
+    n_crit = cats.count("critical")
+    n_neg = cats.count("negative")
+    n_pos = cats.count("positive")
+
+    score = 0
+    parts: list[str] = []
+    if n_crit > 0:
+        score = -2
+        parts.append(f"중대 공시 {n_crit}건")
+    elif n_neg > 0:
+        score = -1
+        parts.append(f"부정 공시 {n_neg}건")
+    if n_pos > 0:
+        if score >= 0:
+            score = 1
+        parts.append(f"긍정 공시 {n_pos}건")
+
+    if not parts:
+        msg = f"최근 30일 routine 공시만 ({len(disclosures)}건)"
+    else:
+        msg = ", ".join(parts)
+
+    new_item: ScoreItem = {"name": "공시", "score": score, "msg": msg, "max": 1}
+    scores = result.get("scores", [])
+    replaced = False
+    for i, s in enumerate(scores):
+        if s.get("name") == "공시":
+            scores[i] = new_item
+            replaced = True
+            break
+    if not replaced:
+        scores.append(new_item)
+
+    total = sum(s.get("score", 0) for s in scores)
+    max_possible = sum(s.get("max", 0) for s in scores)
+    result["total"] = total
+    result["opinion"] = overall_opinion(total, max_possible)
+
+
 def enrich_with_deep_analysis(result: dict, top_n: int = 3) -> None:
     """
     이미 분석된 결과(result)의 중요 공시(critical/negative/positive 상위 N개)에
@@ -739,11 +785,11 @@ def analyze(code: str, lite: bool = False, deep_top: int = 3) -> AnalysisResult:
             growth_item = score_growth(fin)
             if growth_item is not None:
                 scores.append(growth_item)
-        except Exception as e:
+        except Exception:
             scores.append({
                 "name": "재무",
                 "score": 0,
-                "msg": f"DART 조회 실패: {e}",
+                "msg": "DART 일시 조회 실패 (네트워크·속도 제한 가능성)",
                 "max": 0,
             })
 
