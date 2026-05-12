@@ -508,6 +508,55 @@ def score_risk(df: pd.DataFrame) -> ScoreItem:
     return {"name": "가격 리스크", "score": score, "msg": msg, "max": 0}
 
 
+def enrich_with_deep_analysis(result: dict, top_n: int = 3) -> None:
+    """
+    이미 분석된 결과(result)의 중요 공시(critical/negative/positive 상위 N개)에
+    LLM 깊이 분석(rationale·key_points)을 추가. In-place 수정.
+
+    스크리닝은 빠르게 돌리기 위해 깊이 분석 생략(deep_top=0)하고,
+    통과한 종목에만 사후적으로 이 함수로 깊이 분석을 추가하는 2단계 구조에 사용.
+    """
+    disclosures = result.get("disclosures") or []
+    if not disclosures or not llm.is_configured():
+        return
+
+    priority = {"critical": 0, "negative": 1, "positive": 2}
+    important = [
+        d for d in disclosures
+        if d.get("category") in priority
+        and d.get("rcept_no")
+        and "자회사의 주요경영사항" not in d.get("title", "")
+    ]
+    important.sort(key=lambda d: (
+        priority.get(d.get("category", ""), 99),
+        -int(d.get("rcept_no", "0") or 0),
+    ))
+
+    cache = llm.get_cache()
+    for d in important[:top_n]:
+        rcept_no = d.get("rcept_no", "")
+        # 이미 깊이 분석돼있으면 캐시에서 가져와 머지
+        if cache.has_pro_analysis(rcept_no):
+            cached = cache.get(rcept_no)
+            if cached:
+                d.update(cached)
+            continue
+        try:
+            content = dart.get_disclosure_content(rcept_no)
+            if not content:
+                continue
+            deep_result = llm.deep_analyze(
+                rcept_no,
+                d.get("title", ""),
+                d.get("submitter", ""),
+                d.get("date", ""),
+                content,
+            )
+            d.update(deep_result)
+        except Exception:
+            pass
+
+
 def analyze_and_score_disclosures(
     disclosures: list[dict],
     deep_analysis_top_n: int = 3,

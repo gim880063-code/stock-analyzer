@@ -421,40 +421,19 @@ with st.sidebar:
 
     min_score = st.slider("최소 종합점수", -10, 10, 0, 1, key="screen_min_score")
 
-    mode = st.radio(
-        "분석 강도",
-        options=["lite", "full"],
-        format_func=lambda m: {
-            "lite": "⚡ 빠른 모드 (점수만, 종목당 ~3초)",
-            "full": "🔬 풀 분석 (+LLM 공시 분류 +뉴스, 종목당 ~8초)",
-        }[m],
-        index=0,
-        key="screen_mode",
-        help=(
-            "💡 스크리닝 단계에선 공시 깊이 분석은 생략됩니다. "
-            "관심 종목을 발견하면 해당 종목 단독으로 클릭하면 깊이 분석까지 자동 실행됩니다."
-        ),
-    )
-
-    # 시간 추정 (배치 LLM + 5/3 병렬, 스크리닝에선 deep_analyze 스킵)
+    # 시간 추정 — 1차 스크리닝(공시 분류·잠정실적·뉴스, 깊이 분석 X) + 2차 깊이 분석
     est_codes = len(get_universe_codes(universe))
-    if mode == "lite":
-        est_sec = est_codes * 5 / 5  # ~5초 ÷ 5병렬
-        est_min = max(1, round(est_sec / 60))
-        st.caption(f"⏱️ 약 {est_min}분 예상 ({est_codes}개 ÷ 5병렬, 잠정실적 포함)")
-    else:
-        est_sec = est_codes * 8 / 3  # ~8초 ÷ 3병렬 (deep_analyze 생략 후)
-        est_min = max(1, round(est_sec / 60))
-        st.caption(
-            f"⏱️ 약 {est_min}분 예상 ({est_codes}개 ÷ 3병렬, "
-            "공시 분류 + 잠정실적 + 뉴스 — 깊이 분석은 단독 클릭 시 실행)"
-        )
+    est_pass1_sec = est_codes * 8 / 3
+    est_min = max(1, round(est_pass1_sec / 60))
+    st.caption(
+        f"⏱️ 1차 스크리닝 약 {est_min}분 예상 "
+        f"({est_codes}개 ÷ 3병렬). 통과 종목엔 추가 깊이 분석 자동 실행."
+    )
 
     if st.button("🔍 발굴 시작", use_container_width=True, key="run_screen"):
         st.session_state["_screen"] = {
             "universe": universe,
             "min_score": min_score,
-            "lite": mode == "lite",
         }
         st.rerun()
 
@@ -1205,21 +1184,20 @@ results = None
 if screen_req:
     universe = screen_req["universe"]
     min_score = screen_req["min_score"]
-    use_lite = screen_req.get("lite", True)
+    use_lite = False  # 항상 풀 모드 (lite 모드 제거됨)
     codes = get_universe_codes(universe)
     label = UNIVERSE_LABELS.get(universe, universe)
-    mode_label = "⚡ Lite" if use_lite else "🔬 Full"
 
-    st.subheader(f"🔍 발굴 결과 — {label} ({mode_label})")
+    st.subheader(f"🔍 발굴 결과 — {label}")
     if not codes:
         st.error("유니버스 종목 목록을 가져오지 못했습니다.")
     else:
+        st.caption("1단계: 전체 분석 (공시 분류 + 잠정실적 + 뉴스)")
         progress = st.progress(0)
         status = st.empty()
         screened: list[dict] = []
         errors = 0
-        # 병렬 처리: lite 모드는 5개, full 모드는 3개씩 동시 (Gemini 한도 고려)
-        max_workers = 5 if use_lite else 3
+        max_workers = 3
         completed = 0
 
         # 스크리닝 동안 점수 히스토리를 배치 모드로 — N개 분석마다 N번 Gist 저장하는
@@ -1273,21 +1251,35 @@ if screen_req:
         results = [r for r in fresh_results if r.get("total", -999) >= min_score]
         excluded_score = len(fresh_results) - len(results)
 
-        mode_note = (
-            "⚡ Lite 모드 — 공시 본문·뉴스 미포함."
-            if use_lite
-            else "🔬 Full 모드 — LLM 공시 분석 + 뉴스 포함."
-        )
+        # 2단계: 통과 종목들에 깊이 분석 추가 (LLM rationale + key_points)
+        if results:
+            from analyzer import enrich_with_deep_analysis
+            st.caption(f"2단계: 통과 {len(results)}개 종목 정밀 분석 중...")
+            deep_progress = st.progress(0)
+            with ThreadPoolExecutor(max_workers=3) as deep_exec:
+                deep_futures = {
+                    deep_exec.submit(enrich_with_deep_analysis, r, 3): r
+                    for r in results
+                }
+                deep_done = 0
+                for future in as_completed(deep_futures):
+                    try:
+                        future.result()
+                    except Exception:
+                        pass
+                    deep_done += 1
+                    deep_progress.progress(deep_done / len(results))
+            deep_progress.empty()
 
         if results:
             # 정상: 통과 종목 있음
             msg = (
-                f"✅ {len(codes)}개 분석 · **{len(results)}개 통과** "
+                f"✅ {len(codes)}개 1차 분석 · **{len(results)}개 통과** + 정밀 분석 완료 "
                 f"(점수 ≥ {min_score:+d}, 에러 {errors}건"
             )
             if excluded_stale > 0:
                 msg += f", {excluded_stale}개 제외 — 재무 stale + 잠정실적 미발표"
-            msg += f"). {mode_note}"
+            msg += ")."
             st.success(msg)
 
             # 📌 발굴 추적 추가 버튼
@@ -1315,11 +1307,6 @@ if screen_req:
                     "발굴 추적에 넣으면 매일 점수 변화 + 안전 유니버스 이탈 자동 감지"
                 )
 
-            if use_lite:
-                st.info(
-                    "💡 더 자세히 보고 싶은 종목이 있으면 사이드바 ⭐로 즐겨찾기 → "
-                    "종목명 클릭 시 LLM 공시 분석·뉴스까지 포함된 풀 분석이 돌아갑니다."
-                )
         else:
             # 빈 결과 — 명확히 안내 + 원인 설명 + 다음 액션 제안
             top_score = max(
