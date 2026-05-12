@@ -426,32 +426,29 @@ with st.sidebar:
         options=["lite", "full"],
         format_func=lambda m: {
             "lite": "⚡ 빠른 모드 (점수만, 종목당 ~3초)",
-            "full": "🔬 풀 분석 (+LLM 공시 +뉴스, 종목당 ~30초)",
+            "full": "🔬 풀 분석 (+LLM 공시 분류 +뉴스, 종목당 ~8초)",
         }[m],
         index=0,
         key="screen_mode",
+        help=(
+            "💡 스크리닝 단계에선 공시 깊이 분석은 생략됩니다. "
+            "관심 종목을 발견하면 해당 종목 단독으로 클릭하면 깊이 분석까지 자동 실행됩니다."
+        ),
     )
 
-    # 시간 추정 (배치 LLM + 5/3 병렬 적용 후)
+    # 시간 추정 (배치 LLM + 5/3 병렬, 스크리닝에선 deep_analyze 스킵)
     est_codes = len(get_universe_codes(universe))
     if mode == "lite":
-        # lite도 잠정실적 추출(1회 LLM)은 함 → 종목당 ~5초, 5개 병렬
-        est_sec = est_codes * 5 / 5
+        est_sec = est_codes * 5 / 5  # ~5초 ÷ 5병렬
         est_min = max(1, round(est_sec / 60))
         st.caption(f"⏱️ 약 {est_min}분 예상 ({est_codes}개 ÷ 5병렬, 잠정실적 포함)")
     else:
-        est_sec = est_codes * 15 / 3  # 풀 LLM 종목당 ~15초, 3개 병렬
-        est_min = round(est_sec / 60)
-        if est_codes > 50:
-            st.warning(
-                f"⏱️ 풀 분석 — 약 {est_min}분 예상 ({est_codes}개 ÷ 3병렬, "
-                "잠정실적 + LLM 공시 본문 분석 + 뉴스 포함)"
-            )
-        else:
-            st.caption(
-                f"⏱️ 약 {est_min}분 예상 ({est_codes}개 ÷ 3병렬, "
-                "잠정실적 + LLM 공시 본문 분석 + 뉴스 포함)"
-            )
+        est_sec = est_codes * 8 / 3  # ~8초 ÷ 3병렬 (deep_analyze 생략 후)
+        est_min = max(1, round(est_sec / 60))
+        st.caption(
+            f"⏱️ 약 {est_min}분 예상 ({est_codes}개 ÷ 3병렬, "
+            "공시 분류 + 잠정실적 + 뉴스 — 깊이 분석은 단독 클릭 시 실행)"
+        )
 
     if st.button("🔍 발굴 시작", use_container_width=True, key="run_screen"):
         st.session_state["_screen"] = {
@@ -768,8 +765,8 @@ DART OPEN API에서 최근 30일 공시 목록을 받아서 **Gemini로 분류**
 
 # 분석 결과 캐시
 @st.cache_data(ttl=600, show_spinner=False)
-def cached_analyze(code: str, lite: bool = False) -> dict:
-    return analyze(code, lite=lite)
+def cached_analyze(code: str, lite: bool = False, deep_top: int = 3) -> dict:
+    return analyze(code, lite=lite, deep_top=deep_top)
 
 
 # 분석 로직이 바뀔 때마다 이 버전을 올려서 기존 캐시를 무효화
@@ -1230,7 +1227,11 @@ if screen_req:
         hist_module.begin_batch()
         try:
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                futures = {executor.submit(cached_analyze, c, use_lite): c for c in codes}
+                # 스크리닝은 깊이 분석 스킵 (deep_top=0) — 종목당 10초 이상 절감
+                futures = {
+                    executor.submit(cached_analyze, c, use_lite, 0): c
+                    for c in codes
+                }
                 for future in as_completed(futures):
                     c = futures[future]
                     try:

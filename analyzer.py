@@ -615,13 +615,17 @@ def _resolve_name(code: str) -> str:
         return code
 
 
-def analyze(code: str, lite: bool = False) -> AnalysisResult:
+def analyze(code: str, lite: bool = False, deep_top: int = 3) -> AnalysisResult:
     """
     종목 분석.
 
     lite=True: 빠른 스크리닝용. LLM 공시 본문 분석 + 뉴스 수집 생략.
               점수 자체는 동일하게 산출 (공시는 룰 기반 분류).
-              종목당 ~3-5초 (vs full ~30초).
+              종목당 ~3-5초.
+
+    deep_top: LLM Pro로 본문 깊이 분석할 중요 공시 상위 N개 (lite=False 일 때만).
+              스크리닝 시 0으로 호출하면 깊이 분석 스킵 → 종목당 ~10초 절약.
+              개별 종목 단독 분석 시 기본 3으로 두면 자세한 근거·요약 받음.
     """
     name = _resolve_name(code)
     try:
@@ -702,7 +706,9 @@ def analyze(code: str, lite: bool = False) -> AnalysisResult:
         try:
             raw_disclosures_full = dart.get_recent_disclosures(code, days=30, max_count=50)
             disclosures, disc_score = analyze_and_score_disclosures(
-                raw_disclosures_full[:15], use_llm=not lite,
+                raw_disclosures_full[:15],
+                use_llm=not lite,
+                deep_analysis_top_n=deep_top,
             )
             if disc_score is not None:
                 scores.append(disc_score)
