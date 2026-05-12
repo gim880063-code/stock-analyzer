@@ -314,132 +314,34 @@ with st.sidebar:
             st.success(f"{stock_dict.get(code, code)} 저장됨")
             st.rerun()
 
-    # ─────────── 스크리닝 히스토리 ───────────
+    # ─────────── 스크리닝 후보 진입점 (가벼움) ───────────
     st.divider()
-    st.subheader("📌 최근 스크리닝 후보")
-
-    recent_picks = screening_history.get_recent(days=90)
-    if not recent_picks:
-        st.caption(
-            "스크리닝 돌리면 통과 종목이 자동으로 여기 쌓입니다 (90일 보관). "
-            "매일 점수 변화·주가 추이·안전 유니버스 이탈을 자동 추적."
-        )
-    else:
-        # 현재 안전 유니버스 멤버십 확인
+    recent_picks_count = screening_history.get_recent(days=90)
+    if recent_picks_count:
+        # 간단 통계
         try:
-            safe_codes = set(get_universe_codes("safe"))
+            safe_codes_quick = set(get_universe_codes("safe"))
         except Exception:
-            safe_codes = set()
+            safe_codes_quick = set()
+        n_total = len(recent_picks_count)
+        n_dropped_screen = sum(1 for m in recent_picks_count.values() if not m["in_latest"])
+        n_dropped_uni = sum(1 for c in recent_picks_count if c not in safe_codes_quick)
+        n_active = n_total - n_dropped_screen
 
-        # 최근 점수 추세를 위한 전체 히스토리 (1회 fetch)
-        all_history = hist_module._load()
-        latest_date = next(iter(recent_picks.values())).get("latest_date", "")
+        btn_label = f"📌 최근 스크리닝 후보 ({n_active}/{n_total})"
+        if st.button(btn_label, use_container_width=True, key="open_screen_hist"):
+            st.session_state["_view_mode"] = "screening_history"
+            st.rerun()
 
-        # 통계 요약
-        dropped_from_screen = sum(1 for m in recent_picks.values() if not m["in_latest"])
-        dropped_from_uni = sum(1 for c in recent_picks if c not in safe_codes)
-        if dropped_from_screen > 0 or dropped_from_uni > 0:
-            parts = []
-            if dropped_from_screen > 0:
-                parts.append(f"최근 스크리닝 탈락 {dropped_from_screen}개")
-            if dropped_from_uni > 0:
-                parts.append(f"안전 유니버스 이탈 {dropped_from_uni}개")
-            st.warning("⚠️ " + " · ".join(parts))
-
-        # 정렬: (1) 최근 등장 종목 우선, (2) 등장 횟수 많은 순, (3) 첫 등장일
-        sorted_codes = sorted(
-            recent_picks.keys(),
-            key=lambda c: (
-                0 if recent_picks[c]["in_latest"] else 1,
-                -recent_picks[c]["count"],
-                recent_picks[c]["first_seen"],
-            ),
-        )
-
-        for code in sorted_codes:
-            meta = recent_picks[code]
-            name = stock_dict.get(code, "?")
-            in_universe = code in safe_codes
-            in_latest = meta["in_latest"]
-
-            entries = all_history.get(code, [])
-            latest_score = entries[-1]["total"] if entries else None
-            latest_close = entries[-1].get("close") if entries else None
-            prev_score = entries[-2]["total"] if len(entries) >= 2 else None
-            prev_close = entries[-2].get("close") if len(entries) >= 2 else None
-            score_delta = (latest_score - prev_score) if (
-                latest_score is not None and prev_score is not None
-            ) else None
-            price_delta_pct = (
-                (latest_close / prev_close - 1) * 100
-                if latest_close and prev_close
-                else None
-            )
-
-            with st.container(border=True):
-                # 헤더: 종목명 + 상태 마크
-                marks = []
-                if not in_latest:
-                    marks.append("⚠️탈락")
-                if not in_universe:
-                    marks.append("⚠️유니버스이탈")
-                mark_str = (" " + " ".join(marks)) if marks else ""
-
-                if st.button(
-                    f"📌 {name} ({code}){mark_str}",
-                    key=f"hist_btn_{code}",
-                    use_container_width=True,
-                    help=f"{name} 단독 분석",
-                ):
-                    st.session_state["_focus_code"] = code
-                    st.rerun()
-
-                # 점수 + 주가 한 줄
-                lines = []
-                if latest_score is not None:
-                    score_part = f"<b>{latest_score:+d}점</b>"
-                    if score_delta is not None:
-                        if score_delta > 0:
-                            score_part += f" <span style='color:#1f7a3a'>↗{score_delta:+d}</span>"
-                        elif score_delta < 0:
-                            score_part += f" <span style='color:#a3201a'>↘{score_delta:+d}</span>"
-                        else:
-                            score_part += " <span style='color:#666'>→</span>"
-                    lines.append(score_part)
-
-                if latest_close is not None:
-                    price_part = f"{latest_close:,.0f}원"
-                    if price_delta_pct is not None:
-                        if price_delta_pct > 0:
-                            price_part += f" <span style='color:#1f7a3a'>+{price_delta_pct:.1f}%</span>"
-                        elif price_delta_pct < 0:
-                            price_part += f" <span style='color:#a3201a'>{price_delta_pct:.1f}%</span>"
-                    lines.append(price_part)
-
-                line1 = " · ".join(lines) if lines else "<span style='color:#666'>분석 데이터 없음</span>"
-
-                # 두 번째 라인: 등장 정보 + 유니버스 상태
-                uni_status = (
-                    "<span style='color:#1f7a3a'>✅ 유니버스 내</span>"
-                    if in_universe
-                    else "<span style='color:#a3201a;font-weight:600'>⚠️ 유니버스 이탈</span>"
-                )
-                latest_status = (
-                    f"<span style='color:#1f7a3a'>{latest_date} 등장</span>"
-                    if in_latest
-                    else f"<span style='color:#a3201a'>마지막 {meta['last_seen']}</span>"
-                )
-
-                st.markdown(
-                    f"<small>{line1}<br>"
-                    f"{uni_status} · {latest_status} · {meta['count']}회 등장 (첫 {meta['first_seen']})"
-                    f"</small>",
-                    unsafe_allow_html=True,
-                )
-
+        sub_parts = [f"현역 {n_active}개"]
+        if n_dropped_screen > 0:
+            sub_parts.append(f"⚠️탈락 {n_dropped_screen}")
+        if n_dropped_uni > 0:
+            sub_parts.append(f"⚠️유니버스이탈 {n_dropped_uni}")
+        st.caption(" · ".join(sub_parts) + " · 90일 누적")
+    else:
         st.caption(
-            f"최근 90일 누적 {len(recent_picks)}개 · "
-            f"마지막 스크리닝: {latest_date}"
+            "📌 스크리닝 돌리면 통과 종목이 여기 자동으로 누적됩니다 (90일 보관)"
         )
 
     st.divider()
@@ -1210,6 +1112,156 @@ def render_stock_card(r: dict, favorites: list[str]) -> None:
 
 
 # 메인 영역
+
+# 1) 스크리닝 후보 전용 뷰 모드 (사이드바 '📌 최근 스크리닝 후보' 버튼 클릭 시)
+if st.session_state.get("_view_mode") == "screening_history":
+    st.subheader("📌 최근 스크리닝 후보 (90일 누적)")
+
+    if st.button("← 분석 화면으로 돌아가기", key="back_to_analysis"):
+        st.session_state.pop("_view_mode", None)
+        st.rerun()
+
+    recent_picks = screening_history.get_recent(days=90)
+    if not recent_picks:
+        st.info("아직 누적된 스크리닝 결과가 없습니다. 사이드바 '🔍 발굴 시작' 눌러주세요.")
+    else:
+        # 현재 안전 유니버스 + 점수 히스토리
+        try:
+            safe_codes = set(get_universe_codes("safe"))
+        except Exception:
+            safe_codes = set()
+        all_history = hist_module._load()
+        latest_date = next(iter(recent_picks.values())).get("latest_date", "")
+
+        # 요약 통계
+        n_total = len(recent_picks)
+        n_active = sum(1 for m in recent_picks.values() if m["in_latest"])
+        n_dropped = n_total - n_active
+        n_uni_out = sum(1 for c in recent_picks if c not in safe_codes)
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("누적 후보", f"{n_total}개")
+        c2.metric("최근 등장", f"{n_active}개", help=f"{latest_date} 스크리닝에 통과")
+        c3.metric("탈락", f"{n_dropped}개", delta=None if n_dropped == 0 else f"-{n_dropped}",
+                  delta_color="inverse")
+        c4.metric("유니버스 이탈", f"{n_uni_out}개", delta=None if n_uni_out == 0 else "⚠️",
+                  delta_color="inverse")
+
+        # 필터
+        f_col1, f_col2 = st.columns([1, 2])
+        with f_col1:
+            status_filter = st.radio(
+                "상태",
+                options=["전체", "현역만", "탈락만"],
+                horizontal=True,
+                key="sh_status_filter",
+            )
+        with f_col2:
+            sort_key = st.radio(
+                "정렬",
+                options=["최근 등장순", "등장 횟수순", "점수순", "주가 변화율순"],
+                horizontal=True,
+                key="sh_sort_key",
+            )
+
+        # 행 데이터 빌드
+        rows = []
+        code_order = []
+        for code, meta in recent_picks.items():
+            in_universe = code in safe_codes
+            in_latest = meta["in_latest"]
+
+            if status_filter == "현역만" and not in_latest:
+                continue
+            if status_filter == "탈락만" and in_latest:
+                continue
+
+            entries = all_history.get(code, [])
+            latest_score = entries[-1]["total"] if entries else None
+            latest_close = entries[-1].get("close") if entries else None
+            prev_score = entries[-2]["total"] if len(entries) >= 2 else None
+            prev_close = entries[-2].get("close") if len(entries) >= 2 else None
+            score_delta = (
+                latest_score - prev_score
+                if (latest_score is not None and prev_score is not None)
+                else None
+            )
+            price_delta_pct = (
+                (latest_close / prev_close - 1) * 100
+                if latest_close and prev_close
+                else None
+            )
+
+            name = stock_dict.get(code, code)
+            mark = ""
+            if not in_latest:
+                mark = "⚠️탈락"
+            if not in_universe:
+                mark = (mark + " " if mark else "") + "⚠️유니버스이탈"
+
+            rows.append({
+                "종목": f"{name} ({code}){' ' + mark if mark else ''}",
+                "점수": latest_score if latest_score is not None else "-",
+                "점수변화": score_delta if score_delta is not None else "-",
+                "주가(원)": latest_close if latest_close is not None else "-",
+                "주가변화%": (
+                    round(price_delta_pct, 2) if price_delta_pct is not None else "-"
+                ),
+                "유니버스": "✅" if in_universe else "⚠️ 이탈",
+                "등장": meta["count"],
+                "첫등장": meta["first_seen"],
+                "마지막": meta["last_seen"],
+                "상태": "현역" if in_latest else "탈락",
+            })
+            code_order.append(code)
+
+        # 정렬
+        def _sort_key(idx_row):
+            i, r = idx_row
+            v = r.get({
+                "최근 등장순": "마지막",
+                "등장 횟수순": "등장",
+                "점수순": "점수",
+                "주가 변화율순": "주가변화%",
+            }[sort_key])
+            if v in ("-", None):
+                return (1, 0)
+            return (0, -v if isinstance(v, (int, float)) else v)
+
+        indexed = list(enumerate(rows))
+        indexed.sort(key=_sort_key)
+        rows = [r for _, r in indexed]
+        code_order = [code_order[i] for i, _ in indexed]
+
+        if not rows:
+            st.info("필터 조건에 맞는 종목이 없습니다.")
+        else:
+            df = pd.DataFrame(rows)
+            event = st.dataframe(
+                df,
+                use_container_width=True,
+                hide_index=True,
+                on_select="rerun",
+                selection_mode="single-row",
+                column_config={
+                    "점수": st.column_config.NumberColumn(format="%+d"),
+                    "점수변화": st.column_config.NumberColumn(format="%+d"),
+                    "주가(원)": st.column_config.NumberColumn(format="%,.0f"),
+                    "주가변화%": st.column_config.NumberColumn(format="%+.2f%%"),
+                },
+            )
+            st.caption("종목 행을 클릭하면 해당 종목 단독 분석으로 이동합니다.")
+
+            # 행 클릭 → 분석 화면
+            if event and event.selection.rows:
+                sel_idx = event.selection.rows[0]
+                if sel_idx < len(code_order):
+                    st.session_state["_focus_code"] = code_order[sel_idx]
+                    st.session_state.pop("_view_mode", None)
+                    st.rerun()
+
+    st.stop()  # 이 뷰만 보여주고 아래 일반 분석 흐름은 실행 안 함
+
+
 focus_code = st.session_state.pop("_focus_code", None)
 analyze_favs_only = st.session_state.pop("_analyze_favs_only", False)
 screen_req = st.session_state.pop("_screen", None)
