@@ -27,6 +27,22 @@ GIST_API = "https://api.github.com/gists"
 
 _lock = threading.Lock()
 _gist_cache: dict[str, str] | None = None
+_sync_log: list[str] = []  # 최근 동기화 결과 (성공·실패 모두) — 진단용
+
+
+def _log(msg: str) -> None:
+    _sync_log.append(f"{datetime_now()} {msg}")
+    if len(_sync_log) > 20:
+        _sync_log[:] = _sync_log[-20:]
+
+
+def datetime_now() -> str:
+    from datetime import datetime
+    return datetime.now().strftime("%H:%M:%S")
+
+
+def get_sync_log() -> list[str]:
+    return list(_sync_log)
 
 
 def _get_credentials() -> tuple[str, str]:
@@ -128,9 +144,10 @@ def save(filename: str, data: Any) -> None:
     # 2) Gist (설정 시)
     pat, gist_id = _get_credentials()
     if not (pat and gist_id):
+        _log(f"⏭️ {filename} — Gist 미설정, 로컬만 저장")
         return
     try:
-        requests.patch(
+        r = requests.patch(
             f"{GIST_API}/{gist_id}",
             headers={
                 "Authorization": f"token {pat}",
@@ -139,6 +156,10 @@ def save(filename: str, data: Any) -> None:
             json={"files": {filename: {"content": content}}},
             timeout=10,
         )
-        _invalidate_cache()
-    except Exception:
-        pass  # silent fail — 로컬은 저장됨
+        if r.ok:
+            _log(f"✅ {filename} → Gist ({len(content)} bytes)")
+            _invalidate_cache()
+        else:
+            _log(f"❌ {filename} HTTP {r.status_code}: {r.text[:150]}")
+    except Exception as e:
+        _log(f"❌ {filename} 예외 {type(e).__name__}: {str(e)[:150]}")
