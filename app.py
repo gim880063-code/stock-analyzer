@@ -1130,22 +1130,33 @@ if screen_req:
         # 병렬 처리: lite 모드는 5개, full 모드는 3개씩 동시 (Gemini 한도 고려)
         max_workers = 5 if use_lite else 3
         completed = 0
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {executor.submit(cached_analyze, c, use_lite): c for c in codes}
-            for future in as_completed(futures):
-                c = futures[future]
-                try:
-                    r = future.result()
-                    if not r.get("error"):
-                        screened.append(r)
-                    else:
+
+        # 스크리닝 동안 점수 히스토리를 배치 모드로 — N개 분석마다 N번 Gist 저장하는
+        # 대신 끝에 1번만 저장. 동시 호출로 인한 멈춤·리셋 방지.
+        hist_module.begin_batch()
+        try:
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {executor.submit(cached_analyze, c, use_lite): c for c in codes}
+                for future in as_completed(futures):
+                    c = futures[future]
+                    try:
+                        r = future.result()
+                        if not r.get("error"):
+                            screened.append(r)
+                        else:
+                            errors += 1
+                    except Exception:
                         errors += 1
-                except Exception:
-                    errors += 1
-                completed += 1
-                progress.progress(completed / len(codes))
-                nm = stock_dict.get(c, c)
-                status.caption(f"분석 중 ({completed}/{len(codes)}): {nm} ({c})")
+                    completed += 1
+                    progress.progress(completed / len(codes))
+                    nm = stock_dict.get(c, c)
+                    status.caption(f"분석 중 ({completed}/{len(codes)}): {nm} ({c})")
+        finally:
+            # 정상 종료든 예외든 항상 누적된 히스토리를 한 번에 저장
+            try:
+                hist_module.commit_batch()
+            except Exception:
+                pass
 
         progress.empty()
         status.empty()
