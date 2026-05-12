@@ -964,8 +964,8 @@ def render_stock_card(r: dict, favorites: list[str]) -> None:
 
         # 점수 히스토리 (30일 추세)
         score_hist = hist_module.get_history(r["code"], days=30)
+        st.markdown("**📊 최근 30일 종합점수 추세**")
         if len(score_hist) >= 2:
-            st.markdown("**📊 최근 30일 종합점수 추세**")
             sh_df = pd.DataFrame(score_hist).set_index("date")[["total"]].rename(
                 columns={"total": "종합점수"}
             )
@@ -985,6 +985,16 @@ def render_stock_card(r: dict, favorites: list[str]) -> None:
                     )
                 else:
                     st.caption(f"→ 변화 없음 · {trend['days_recorded']}회 분석 기록")
+        elif len(score_hist) == 1:
+            st.info(
+                f"📌 오늘 분석 1회 기록됨 (`{score_hist[0]['date']}`, "
+                f"{score_hist[0]['total']:+d}점). **내일 한 번 더 분석하면 추세 차트가 표시됩니다.**"
+            )
+        else:
+            st.caption(
+                "분석할 때마다 자동으로 종합점수가 기록됩니다. "
+                "2일 이상 누적되면 추세 차트가 표시됩니다."
+            )
 
         st.markdown("**항목별 분석**")
         score_rows = []
