@@ -1162,7 +1162,6 @@ if screen_req:
         status.empty()
 
         # 1) 재무 데이터 신선도 필터 — stale + 잠정실적 없음 = 제외
-        #    (작년 사업보고서만으로는 1Q 결과 반영 안 돼서 점수 신뢰도 낮음)
         excluded_stale = 0
         fresh_results = []
         for r in screened:
@@ -1177,26 +1176,63 @@ if screen_req:
         # 2) 종합점수 내림차순 + 최소 점수 필터
         fresh_results.sort(key=lambda r: r.get("total", -999), reverse=True)
         results = [r for r in fresh_results if r.get("total", -999) >= min_score]
+        excluded_score = len(fresh_results) - len(results)
 
         mode_note = (
             "⚡ Lite 모드 — 공시 본문·뉴스 미포함."
             if use_lite
             else "🔬 Full 모드 — LLM 공시 분석 + 뉴스 포함."
         )
-        msg = (
-            f"✅ {len(codes)}개 분석 · {len(results)}개 통과 "
-            f"(점수 ≥ {min_score:+d}, 에러 {errors}건"
-        )
-        if excluded_stale > 0:
-            msg += f", **{excluded_stale}개 제외** — 재무 데이터 stale + 잠정실적 미발표"
-        msg += f"). {mode_note}"
-        st.success(msg)
-        st.session_state.results = results
-        if use_lite:
-            st.info(
-                "💡 더 자세히 보고 싶은 종목이 있으면 사이드바 ⭐로 즐겨찾기 → "
-                "종목명 클릭 시 LLM 공시 분석·뉴스까지 포함된 풀 분석이 돌아갑니다."
+
+        if results:
+            # 정상: 통과 종목 있음
+            msg = (
+                f"✅ {len(codes)}개 분석 · **{len(results)}개 통과** "
+                f"(점수 ≥ {min_score:+d}, 에러 {errors}건"
             )
+            if excluded_stale > 0:
+                msg += f", {excluded_stale}개 제외 — 재무 stale + 잠정실적 미발표"
+            msg += f"). {mode_note}"
+            st.success(msg)
+            if use_lite:
+                st.info(
+                    "💡 더 자세히 보고 싶은 종목이 있으면 사이드바 ⭐로 즐겨찾기 → "
+                    "종목명 클릭 시 LLM 공시 분석·뉴스까지 포함된 풀 분석이 돌아갑니다."
+                )
+        else:
+            # 빈 결과 — 명확히 안내 + 원인 설명 + 다음 액션 제안
+            top_score = max(
+                (r.get("total", -999) for r in fresh_results), default=None,
+            )
+            st.warning(
+                f"🚫 **조건을 통과한 종목이 없습니다** "
+                f"({len(codes)}개 분석)"
+            )
+            with st.container(border=True):
+                st.markdown("#### 📊 발굴 내역")
+                lines = [
+                    f"- 분석 시도: **{len(codes)}개**",
+                    f"- 에러: {errors}개",
+                ]
+                if excluded_stale > 0:
+                    lines.append(
+                        f"- 재무 stale + 잠정실적 없음 자동 제외: **{excluded_stale}개**"
+                    )
+                lines.append(
+                    f"- 점수 {min_score:+d}점 미만으로 탈락: **{excluded_score}개**"
+                )
+                if top_score is not None:
+                    lines.append(f"- 통과 후보 중 최고 점수: **{top_score:+d}점**")
+                st.markdown("\n".join(lines))
+
+                st.markdown("#### 💡 다음 시도")
+                st.markdown(
+                    f"- 사이드바에서 **최소 종합점수를 낮춰**보세요 "
+                    f"(현재 `{min_score:+d}`, 추천 `{max(top_score, 0) if top_score is not None else 0:+d}` 정도부터)\n"
+                    "- 더 넓은 유니버스(KOSPI TOP 50 등) 선택\n"
+                    "- 5/15 이후 1Q 보고서가 등록되면 stale 제외 종목들도 후보에 다시 들어옵니다"
+                )
+        st.session_state.results = results
 
 elif focus_code:
     name = stock_dict.get(focus_code, focus_code)
