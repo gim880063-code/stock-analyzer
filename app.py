@@ -318,10 +318,10 @@ with st.sidebar:
     st.divider()
     st.subheader("📌 최근 스크리닝 후보")
 
-    recent_picks = screening_history.get_recent(days=14)
+    recent_picks = screening_history.get_recent(days=90)
     if not recent_picks:
         st.caption(
-            "스크리닝 돌리면 통과 종목이 자동으로 여기 쌓입니다 (14일 보관). "
+            "스크리닝 돌리면 통과 종목이 자동으로 여기 쌓입니다 (90일 보관). "
             "매일 점수 변화·주가 추이·안전 유니버스 이탈을 자동 추적."
         )
     else:
@@ -438,7 +438,7 @@ with st.sidebar:
                 )
 
         st.caption(
-            f"최근 14일 누적 {len(recent_picks)}개 · "
+            f"최근 90일 누적 {len(recent_picks)}개 · "
             f"마지막 스크리닝: {latest_date}"
         )
 

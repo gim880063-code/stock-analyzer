@@ -10,7 +10,7 @@
   }
 
 같은 날 여러 번 스크리닝 시 마지막 결과로 덮어씀.
-RETENTION_DAYS(기본 14) 초과 자동 제거.
+RETENTION_DAYS(기본 90) 초과 자동 제거.
 
 활용:
   - 매일 등장한 종목 자동 집계 → 사이드바에서 한눈에 추이 확인
@@ -23,7 +23,7 @@ import cloud_store
 
 
 FILENAME = "screening_history.json"
-RETENTION_DAYS = 14
+RETENTION_DAYS = 90  # 3개월 — 분기 사이클 + 안정적 후보 패턴 파악
 
 
 def _load() -> dict[str, list[str]]:
@@ -39,7 +39,7 @@ def _save(history: dict[str, list[str]]) -> None:
 
 
 def record_today(codes: list[str]) -> None:
-    """오늘 스크리닝 통과 종목 저장 (덮어쓰기). 14일 초과는 자동 제거."""
+    """오늘 스크리닝 통과 종목 저장 (덮어쓰기). 90일 초과는 자동 제거."""
     today = datetime.now().strftime("%Y-%m-%d")
     history = _load()
     history[today] = list(codes)
@@ -50,7 +50,7 @@ def record_today(codes: list[str]) -> None:
     _save(history)
 
 
-def get_recent(days: int = 14) -> dict[str, dict]:
+def get_recent(days: int = 90) -> dict[str, dict]:
     """
     최근 N일 등장 종목 집계.
 
