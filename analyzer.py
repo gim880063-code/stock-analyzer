@@ -12,6 +12,7 @@ import pandas as pd
 import dart
 import naver
 import llm
+import history
 
 
 @lru_cache(maxsize=1)
@@ -788,6 +789,14 @@ def analyze(code: str, lite: bool = False) -> AnalysisResult:
         "analyzed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
 
+    opinion_text = overall_opinion(total, max_possible)
+
+    # 매일 점수 스냅샷 저장 (같은 날 중복은 덮어씀)
+    try:
+        history.record_snapshot(code, total, last_close, opinion_text)
+    except Exception:
+        pass  # 저장 실패해도 분석은 계속
+
     return {
         "code": code,
         "name": name,
@@ -796,7 +805,7 @@ def analyze(code: str, lite: bool = False) -> AnalysisResult:
         "change_pct": float(df["Change"].iloc[-1] * 100),
         "scores": scores,
         "total": total,
-        "opinion": overall_opinion(total, max_possible),
+        "opinion": opinion_text,
         "error": None,
         "history": _build_history(df),
         "disclosures": disclosures,

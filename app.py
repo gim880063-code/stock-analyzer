@@ -14,6 +14,8 @@ from analyzer import (
 )
 import dart
 import llm
+import portfolio as port
+import history as hist_module
 
 
 WATCHLIST_FILE = Path(__file__).parent / "data" / "watchlist.json"
@@ -219,6 +221,89 @@ with st.sidebar:
             st.session_state["_analyze_favs_only"] = True
             st.rerun()
         st.caption("워치리스트와 별도로 즐겨찾기만 분석합니다")
+
+    # ─────────── 포트폴리오 ───────────
+    st.divider()
+    st.subheader("💼 내 포트폴리오")
+
+    portfolio = port.load_portfolio()
+    results_map = {r["code"]: r for r in st.session_state.get("results", []) if not r.get("error")}
+
+    if portfolio:
+        # 분석된 종목 한정으로 손익 합계 계산
+        total_cost = 0.0
+        total_value = 0.0
+        priced = 0
+        for code, h in portfolio.items():
+            r = results_map.get(code)
+            if r:
+                pnl = port.compute_pnl(h, r["last_close"])
+                total_cost += pnl["cost"]
+                total_value += pnl["market_value"]
+                priced += 1
+
+        if priced > 0:
+            total_profit = total_value - total_cost
+            total_pct = (total_value / total_cost - 1) * 100 if total_cost > 0 else 0
+            color = "#1f7a3a" if total_profit >= 0 else "#a3201a"
+            st.markdown(
+                f"<small>총 평가액 <b>{total_value:,.0f}원</b> · "
+                f"<span style='color:{color}'>손익 {total_profit:+,.0f}원 "
+                f"({total_pct:+.2f}%)</span> · {priced}/{len(portfolio)}개 가격 반영</small>",
+                unsafe_allow_html=True,
+            )
+
+        for code, h in portfolio.items():
+            name = stock_dict.get(code, "?")
+            r = results_map.get(code)
+            with st.container(border=True):
+                col_main, col_x = st.columns([5, 1])
+                with col_main:
+                    if st.button(
+                        f"💼 {name} ({code})",
+                        key=f"port_btn_{code}",
+                        use_container_width=True,
+                        help=f"{name}만 단독 분석",
+                    ):
+                        st.session_state["_focus_code"] = code
+                        st.rerun()
+                    cost = h["quantity"] * h["avg_price"]
+                    info = f"<small>{h['quantity']:,}주 @ {h['avg_price']:,.0f}원 · 원금 {cost:,.0f}원</small>"
+                    if r:
+                        pnl = port.compute_pnl(h, r["last_close"])
+                        color = "#1f7a3a" if pnl["profit"] >= 0 else "#a3201a"
+                        info += (
+                            f"<br><small>현재 {r['last_close']:,.0f}원 · "
+                            f"<span style='color:{color};font-weight:600'>"
+                            f"{pnl['profit']:+,.0f}원 ({pnl['profit_pct']:+.2f}%)</span></small>"
+                        )
+                    st.markdown(info, unsafe_allow_html=True)
+                with col_x:
+                    if st.button("✖", key=f"del_port_{code}", help="포트폴리오에서 제거"):
+                        port.remove_holding(code)
+                        st.rerun()
+    else:
+        st.caption("아래에서 보유 종목을 등록하세요")
+
+    with st.expander("➕ 보유 종목 추가/수정"):
+        port_options = [f"{c} {n}" for c, n in sorted(stock_dict.items())]
+        port_sel = st.selectbox(
+            "종목 선택",
+            options=port_options,
+            key="port_add_select",
+            index=0,
+        )
+        port_qty = st.number_input(
+            "수량 (주)", min_value=1, step=1, value=10, key="port_add_qty",
+        )
+        port_price = st.number_input(
+            "평균 매수가 (원)", min_value=1, step=100, value=10000, key="port_add_price",
+        )
+        if st.button("저장", key="port_add_save", use_container_width=True):
+            code = port_sel.split(maxsplit=1)[0]
+            port.add_holding(code, port_qty, port_price)
+            st.success(f"{stock_dict.get(code, code)} 저장됨")
+            st.rerun()
 
     st.divider()
     st.subheader("🔍 종목 발굴 (스크리닝)")
@@ -586,7 +671,7 @@ def cached_analyze(code: str, lite: bool = False) -> dict:
 
 
 # 분석 로직이 바뀔 때마다 이 버전을 올려서 기존 캐시를 무효화
-ANALYZER_VERSION = "v22-2026-05-10-screen-stale-filter"
+ANALYZER_VERSION = "v23-2026-05-10-portfolio-history"
 if st.session_state.get("_analyzer_cache_version") != ANALYZER_VERSION:
     cached_analyze.clear()
     st.session_state["_analyzer_cache_version"] = ANALYZER_VERSION
@@ -855,10 +940,51 @@ def render_stock_card(r: dict, favorites: list[str]) -> None:
         m2.metric("종합점수", f"{r['total']:+d}점")
         m3.metric("의견", f"{opinion_emoji(r['total'])} {r['opinion'].split(' — ')[0]}")
 
+        # 보유 종목이면 손익 badge
+        portfolio_local = port.load_portfolio()
+        if r["code"] in portfolio_local:
+            h = portfolio_local[r["code"]]
+            pnl = port.compute_pnl(h, r["last_close"])
+            color = "#1f7a3a" if pnl["profit"] >= 0 else "#a3201a"
+            st.markdown(
+                f"<div style='padding:8px 12px;border-radius:6px;"
+                f"background:rgba(46,160,67,0.08);margin-bottom:8px'>"
+                f"💼 <b>보유 중</b>: {h['quantity']:,}주 @ {h['avg_price']:,.0f}원 "
+                f"→ 평가액 <b>{pnl['market_value']:,.0f}원</b> · "
+                f"<span style='color:{color};font-weight:600'>"
+                f"손익 {pnl['profit']:+,.0f}원 ({pnl['profit_pct']:+.2f}%)</span>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+
         if r.get("history"):
             hist = pd.DataFrame(r["history"]).set_index("Date")
             st.markdown("**최근 120일 종가 / 20일선 / 60일선**")
             st.line_chart(hist, height=240)
+
+        # 점수 히스토리 (14일 추세)
+        score_hist = hist_module.get_history(r["code"], days=14)
+        if len(score_hist) >= 2:
+            st.markdown("**📊 최근 14일 종합점수 추세**")
+            sh_df = pd.DataFrame(score_hist).set_index("date")[["total"]].rename(
+                columns={"total": "종합점수"}
+            )
+            st.line_chart(sh_df, height=160)
+            trend = hist_module.compute_trend(r["code"], days=14)
+            if trend:
+                delta = trend["delta"]
+                if delta > 0:
+                    st.caption(
+                        f"📈 {trend['first_score']:+d} → {trend['last_score']:+d} "
+                        f"({delta:+d}점 상승 · {trend['days_recorded']}회 분석 기록)"
+                    )
+                elif delta < 0:
+                    st.caption(
+                        f"📉 {trend['first_score']:+d} → {trend['last_score']:+d} "
+                        f"({delta:+d}점 하락 · {trend['days_recorded']}회 분석 기록)"
+                    )
+                else:
+                    st.caption(f"→ 변화 없음 · {trend['days_recorded']}회 분석 기록")
 
         st.markdown("**항목별 분석**")
         score_rows = []
