@@ -1246,7 +1246,7 @@ if st.session_state.get("_view_mode") == "screening_history":
         with f_col2:
             sort_key = st.radio(
                 "정렬",
-                options=["최근 등장순", "등장 횟수순", "점수순", "주가 변화율순"],
+                options=["최근 등장순", "등장 횟수순", "점수순", "전일대비%순", "추적기간%순"],
                 horizontal=True,
                 key="sh_sort_key",
             )
@@ -1279,6 +1279,22 @@ if st.session_state.get("_view_mode") == "screening_history":
                 else None
             )
 
+            # 추적 시작 시점 주가 찾기 (첫 등장일 또는 가장 가까운 entry)
+            first_seen = meta.get("first_seen", "")
+            first_close = None
+            for e in entries:
+                if e.get("date") == first_seen:
+                    first_close = e.get("close")
+                    break
+            # 첫 등장일에 종가 데이터 없으면 가장 오래된 entry 사용
+            if first_close is None and entries:
+                first_close = entries[0].get("close")
+            since_first_pct = (
+                (latest_close / first_close - 1) * 100
+                if latest_close and first_close
+                else None
+            )
+
             name = stock_dict.get(code, code)
             mark = ""
             if not in_latest:
@@ -1291,8 +1307,11 @@ if st.session_state.get("_view_mode") == "screening_history":
                 "점수": latest_score if latest_score is not None else "-",
                 "점수변화": score_delta if score_delta is not None else "-",
                 "주가(원)": latest_close if latest_close is not None else "-",
-                "주가변화%": (
+                "전일대비%": (
                     round(price_delta_pct, 2) if price_delta_pct is not None else "-"
+                ),
+                "추적기간%": (
+                    round(since_first_pct, 2) if since_first_pct is not None else "-"
                 ),
                 "유니버스": "✅" if in_universe else "⚠️ 이탈",
                 "등장": meta["count"],
@@ -1309,7 +1328,8 @@ if st.session_state.get("_view_mode") == "screening_history":
                 "최근 등장순": "마지막",
                 "등장 횟수순": "등장",
                 "점수순": "점수",
-                "주가 변화율순": "주가변화%",
+                "전일대비%순": "전일대비%",
+                "추적기간%순": "추적기간%",
             }[sort_key])
             if v in ("-", None):
                 return (1, 0)
@@ -1334,7 +1354,14 @@ if st.session_state.get("_view_mode") == "screening_history":
                     "점수": st.column_config.NumberColumn(format="%+d"),
                     "점수변화": st.column_config.NumberColumn(format="%+d"),
                     "주가(원)": st.column_config.NumberColumn(format="%,.0f"),
-                    "주가변화%": st.column_config.NumberColumn(format="%+.2f%%"),
+                    "전일대비%": st.column_config.NumberColumn(
+                        format="%+.2f%%",
+                        help="가장 최근 분석과 그 직전 분석 사이의 종가 변화",
+                    ),
+                    "추적기간%": st.column_config.NumberColumn(
+                        format="%+.2f%%",
+                        help="추적 시작(첫 등장)일 종가 대비 현재 종가 변화",
+                    ),
                 },
             )
             st.caption("종목 행을 클릭하면 해당 종목 단독 분석으로 이동합니다.")
