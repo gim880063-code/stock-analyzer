@@ -257,11 +257,14 @@ with st.sidebar:
         est_min = round(est_sec / 60)
         if est_codes > 50:
             st.warning(
-                f"⏱️ 풀 분석 — 약 {est_min}분 예상. "
-                "Gemini Pro 일일 한도(25~50회)를 넘을 수 있어 일부는 Flash 결과로 대체됩니다."
+                f"⏱️ 풀 분석 — 약 {est_min}분 예상 ({est_codes}개 ÷ 3병렬, "
+                "잠정실적 + LLM 공시 본문 분석 + 뉴스 포함)"
             )
         else:
-            st.caption(f"⏱️ 약 {est_min}분 예상 ({est_codes}개 ÷ 3병렬)")
+            st.caption(
+                f"⏱️ 약 {est_min}분 예상 ({est_codes}개 ÷ 3병렬, "
+                "잠정실적 + LLM 공시 본문 분석 + 뉴스 포함)"
+            )
 
     if st.button("🔍 발굴 시작", use_container_width=True, key="run_screen"):
         st.session_state["_screen"] = {
