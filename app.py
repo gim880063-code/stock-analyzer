@@ -6,7 +6,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import pandas as pd
-import altair as alt
 import streamlit as st
 
 from analyzer import (
@@ -993,49 +992,53 @@ def render_stock_card(r: dict, favorites: list[str]) -> None:
 
             sh_df = sh_df.dropna(subset=["date", "종합점수"]).sort_values("date")
 
-            score_line = (
-                alt.Chart(sh_df)
-                .mark_line(point=True)
-                .encode(
-                    x=alt.X("date:T", title="분석일"),
-                    y=alt.Y(
-                        "종합점수:Q",
-                        title="종합점수",
-                        axis=alt.Axis(title="종합점수", orient="left"),
-                    ),
-                    tooltip=[
-                        alt.Tooltip("date:T", title="날짜", format="%Y-%m-%d"),
-                        alt.Tooltip("종합점수:Q", title="종합점수", format="+.0f"),
-                    ],
-                )
-            )
-
             price_df = sh_df.dropna(subset=["주가"])
             if not price_df.empty:
-                price_line = (
-                    alt.Chart(price_df)
-                    .mark_line(point=True, strokeDash=[5, 4])
-                    .encode(
-                        x=alt.X("date:T", title="분석일"),
-                        y=alt.Y(
-                            "주가:Q",
-                            title="주가(원)",
-                            axis=alt.Axis(title="주가(원)", orient="right", format=","),
-                            scale=alt.Scale(zero=False),
-                        ),
-                        tooltip=[
-                            alt.Tooltip("date:T", title="날짜", format="%Y-%m-%d"),
-                            alt.Tooltip("주가:Q", title="주가", format=",.0f"),
-                        ],
-                    )
-                )
+                chart_df = sh_df.dropna(subset=["주가"]).copy()
+                chart_df["date"] = chart_df["date"].dt.strftime("%Y-%m-%d")
 
-                chart = (
-                    alt.layer(score_line, price_line)
-                    .resolve_scale(y="independent")
-                    .properties(height=220)
-                )
-                st.altair_chart(chart, use_container_width=True)
+                chart_spec = {
+                    "height": 220,
+                    "layer": [
+                        {
+                            "mark": {"type": "line", "point": True},
+                            "encoding": {
+                                "x": {"field": "date", "type": "temporal", "title": "분석일"},
+                                "y": {
+                                    "field": "종합점수",
+                                    "type": "quantitative",
+                                    "title": "종합점수",
+                                    "axis": {"title": "종합점수", "orient": "left"},
+                                },
+                                "tooltip": [
+                                    {"field": "date", "type": "temporal", "title": "날짜"},
+                                    {"field": "종합점수", "type": "quantitative", "title": "종합점수"},
+                                    {"field": "주가", "type": "quantitative", "title": "주가", "format": ",.0f"},
+                                ],
+                            },
+                        },
+                        {
+                            "mark": {"type": "line", "point": True, "strokeDash": [5, 4]},
+                            "encoding": {
+                                "x": {"field": "date", "type": "temporal", "title": "분석일"},
+                                "y": {
+                                    "field": "주가",
+                                    "type": "quantitative",
+                                    "title": "주가(원)",
+                                    "axis": {"title": "주가(원)", "orient": "right", "format": ","},
+                                    "scale": {"zero": False},
+                                },
+                                "tooltip": [
+                                    {"field": "date", "type": "temporal", "title": "날짜"},
+                                    {"field": "종합점수", "type": "quantitative", "title": "종합점수"},
+                                    {"field": "주가", "type": "quantitative", "title": "주가", "format": ",.0f"},
+                                ],
+                            },
+                        },
+                    ],
+                    "resolve": {"scale": {"y": "independent"}},
+                }
+                st.vega_lite_chart(chart_df, chart_spec, use_container_width=True)
                 st.caption("실선은 종합점수, 점선은 해당 분석일 종가입니다. 왼쪽 축은 점수, 오른쪽 축은 주가입니다.")
             else:
                 st.line_chart(sh_df.set_index("date")[["종합점수"]], height=160)
