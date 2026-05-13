@@ -800,6 +800,85 @@ CATEGORY_META = {
 }
 
 
+def _compact_score_reasons(r: dict, positive: bool = True, limit: int = 3) -> str:
+    """분석 결과의 항목별 점수에서 신규/탈락 이유로 보여줄 핵심 문장 생성."""
+    scores = r.get("scores") or []
+    if positive:
+        picked = [x for x in scores if isinstance(x, dict) and x.get("score", 0) > 0]
+        picked.sort(key=lambda x: x.get("score", 0), reverse=True)
+    else:
+        picked = [x for x in scores if isinstance(x, dict) and x.get("score", 0) < 0]
+        picked.sort(key=lambda x: x.get("score", 0))
+
+    parts = []
+    for item in picked[:limit]:
+        name = item.get("name", "항목")
+        score = item.get("score", 0)
+        msg = str(item.get("msg", "")).strip()
+        if len(msg) > 34:
+            msg = msg[:34].rstrip() + "…"
+        parts.append(f"{name}({score:+d}: {msg})" if msg else f"{name}({score:+d})")
+    return ", ".join(parts)
+
+
+def _build_pass_reason(r: dict, min_score: int | None = None) -> str:
+    total = r.get("total")
+    threshold = f"기준 {min_score:+d}점 이상" if min_score is not None else "기준 통과"
+    positive = _compact_score_reasons(r, positive=True, limit=3)
+    negative = _compact_score_reasons(r, positive=False, limit=2)
+    base = f"종합점수 {total:+d}점으로 {threshold}" if isinstance(total, int) else threshold
+    if positive:
+        base += f". 긍정 요인: {positive}"
+    if negative:
+        base += f". 주의 요인: {negative}"
+    return base
+
+
+def _build_drop_reason(r: dict, min_score: int | None = None, kind: str = "score") -> str:
+    total = r.get("total")
+    negative = _compact_score_reasons(r, positive=False, limit=3)
+    positive = _compact_score_reasons(r, positive=True, limit=2)
+
+    if kind == "stale":
+        base = "재무 데이터가 오래됐고 잠정실적공시도 없어 스크리닝에서 제외"
+    elif kind == "deep":
+        if isinstance(total, int) and min_score is not None:
+            base = f"정밀 분석 후 종합점수 {total:+d}점으로 기준 {min_score:+d}점 미만"
+        else:
+            base = "정밀 분석 후 기준 미달"
+    else:
+        if isinstance(total, int) and min_score is not None:
+            base = f"종합점수 {total:+d}점으로 기준 {min_score:+d}점 미만"
+        else:
+            base = "종합점수 기준 미달"
+
+    if negative:
+        base += f". 부담 요인: {negative}"
+    elif positive:
+        base += f". 긍정 요인은 있으나 기준점 미달: {positive}"
+    return base
+
+
+def _history_status_label(meta: dict) -> str:
+    latest_date = meta.get("latest_date")
+    if meta.get("in_latest"):
+        return "🆕 신규" if meta.get("first_seen") == latest_date else "✅ 유지"
+    return "⚠️ 탈락"
+
+
+def _history_reason_text(meta: dict, in_universe: bool) -> str:
+    if meta.get("in_latest"):
+        reason = meta.get("reason") or meta.get("last_reason") or "최근 스크리닝 최종 통과"
+        prefix = "신규 등장" if meta.get("first_seen") == meta.get("latest_date") else "유지"
+    else:
+        reason = meta.get("drop_reason") or "최근 스크리닝 최종 통과 목록에 없어 탈락으로 표시됨"
+        prefix = "탈락"
+
+    if not in_universe:
+        reason += " / 안전 유니버스 기준에서도 이탈"
+    return f"{prefix}: {reason}"
+
+
 def _render_one_disclosure(d: dict, brief: bool = False) -> None:
     title = (d.get("title") or "(제목 없음)").strip()
     url = d.get("url") or ""
@@ -1431,6 +1510,8 @@ if st.session_state.get("_view_mode") == "screening_history":
 
             rows.append({
                 "종목": f"{name} ({code}){' ' + mark if mark else ''}",
+                "구분": _history_status_label(meta),
+                "이유": _history_reason_text(meta, in_universe),
                 "점수": latest_score if latest_score is not None else "-",
                 "점수변화": score_delta if score_delta is not None else "-",
                 "주가(원)": latest_close if latest_close is not None else "-",
@@ -1489,9 +1570,34 @@ if st.session_state.get("_view_mode") == "screening_history":
                         format="%+.2f%%",
                         help="추적 시작(첫 등장)일 종가 대비 현재 종가 변화",
                     ),
+                    "구분": st.column_config.TextColumn(
+                        width="small",
+                        help="이번 최신 스크리닝 기준 신규·유지·탈락 여부",
+                    ),
+                    "이유": st.column_config.TextColumn(
+                        width="large",
+                        help="신규 등장 또는 탈락으로 표시된 핵심 이유",
+                    ),
                 },
             )
             st.caption("종목 행을 클릭하면 해당 종목 단독 분석으로 이동합니다.")
+
+            latest_new = [r for r in rows if str(r.get("구분", "")).startswith("🆕")]
+            latest_dropped = [r for r in rows if str(r.get("구분", "")).startswith("⚠️")]
+            if latest_new or latest_dropped:
+                with st.expander("🆕 신규 등장 / ⚠️ 탈락 이유 상세", expanded=True):
+                    if latest_new:
+                        st.markdown("**🆕 신규 등장**")
+                        for r in latest_new:
+                            st.markdown(f"- **{r['종목']}** — {r['이유']}")
+                    if latest_dropped:
+                        st.markdown("**⚠️ 탈락**")
+                        for r in latest_dropped:
+                            st.markdown(f"- **{r['종목']}** — {r['이유']}")
+                    st.caption(
+                        "정확한 항목별 이유는 이 수정 이후 실행한 스크리닝부터 저장됩니다. "
+                        "이전 기록은 '최종 통과 목록에 없음'처럼 단순 표시될 수 있습니다."
+                    )
 
             # 행 클릭 → 분석 화면
             if event and event.selection.rows:
@@ -1578,6 +1684,7 @@ if screen_req:
         status.empty()
 
         # 1) 재무 데이터 신선도 필터 — stale + 잠정실적 없음 = 제외
+        dropped_details: list[dict] = []
         excluded_stale = 0
         fresh_results = []
         for r in screened:
@@ -1586,13 +1693,29 @@ if screen_req:
             has_preliminary = bool(r.get("preliminary"))
             if is_stale and not has_preliminary:
                 excluded_stale += 1
+                dropped_details.append({
+                    "code": r.get("code"),
+                    "name": r.get("name", r.get("code")),
+                    "total": r.get("total"),
+                    "close": r.get("last_close"),
+                    "reason": _build_drop_reason(r, min_score, kind="stale"),
+                })
                 continue
             fresh_results.append(r)
 
         # 2) 종합점수 내림차순 + 최소 점수 필터
         fresh_results.sort(key=lambda r: r.get("total", -999), reverse=True)
         results = [r for r in fresh_results if r.get("total", -999) >= min_score]
-        excluded_score = len(fresh_results) - len(results)
+        score_dropped = [r for r in fresh_results if r.get("total", -999) < min_score]
+        excluded_score = len(score_dropped)
+        for r in score_dropped:
+            dropped_details.append({
+                "code": r.get("code"),
+                "name": r.get("name", r.get("code")),
+                "total": r.get("total"),
+                "close": r.get("last_close"),
+                "reason": _build_drop_reason(r, min_score, kind="score"),
+            })
 
         # 2단계: 통과 종목들에 깊이 분석 추가 + 점수 재계산
         pre_deep_count = len(results)
@@ -1620,17 +1743,38 @@ if screen_req:
             deep_progress.empty()
 
             # 깊이 분석 결과로 점수가 떨어진 종목 제거 (재필터)
-            results = [r for r in results if r.get("total", -999) >= min_score]
+            pre_filter_results = list(results)
+            deep_dropped = [r for r in pre_filter_results if r.get("total", -999) < min_score]
+            for r in deep_dropped:
+                dropped_details.append({
+                    "code": r.get("code"),
+                    "name": r.get("name", r.get("code")),
+                    "total": r.get("total"),
+                    "close": r.get("last_close"),
+                    "reason": _build_drop_reason(r, min_score, kind="deep"),
+                })
+            results = [r for r in pre_filter_results if r.get("total", -999) >= min_score]
             results.sort(key=lambda r: r.get("total", -999), reverse=True)
-            dropped_after_deep = pre_deep_count - len(results)
-
-            # 스크리닝 히스토리 자동 저장 — 깊이 분석 후 통과 종목만
-            try:
-                screening_history.record_today([r["code"] for r in results])
-            except Exception:
-                pass
+            dropped_after_deep = len(deep_dropped)
         else:
             dropped_after_deep = 0
+
+        for r in results:
+            r["_screen_reason"] = _build_pass_reason(r, min_score)
+
+        # 스크리닝 히스토리 자동 저장 — 최종 통과/탈락 이유까지 저장
+        try:
+            if hasattr(screening_history, "record_today_details"):
+                screening_history.record_today_details(
+                    results,
+                    dropped_details,
+                    min_score=min_score,
+                    universe=universe,
+                )
+            else:
+                screening_history.record_today([r["code"] for r in results])
+        except Exception:
+            pass
 
         if results:
             # 정상: 통과 종목 있음
