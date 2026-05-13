@@ -992,46 +992,75 @@ def render_stock_card(r: dict, favorites: list[str]) -> None:
 
             sh_df = sh_df.dropna(subset=["date", "종합점수"]).sort_values("date")
 
-            price_df = sh_df.dropna(subset=["주가"])
-            if not price_df.empty:
-                chart_df = sh_df.dropna(subset=["주가"]).copy()
-                chart_df["date"] = chart_df["date"].dt.strftime("%Y-%m-%d")
+            # 화면에는 날짜만 보이도록 하고, 같은 날짜에 여러 번 분석한 경우 마지막 기록만 사용
+            sh_df["분석일"] = sh_df["date"].dt.strftime("%Y-%m-%d")
+            chart_df = (
+                sh_df.sort_values("date")
+                .groupby("분석일", as_index=False)
+                .last()
+                .sort_values("분석일")
+            )
+
+            # 오른쪽 축 숫자가 4.64e+5처럼 보이지 않도록 만원 단위로 변환
+            chart_df["주가_만원"] = chart_df["주가"] / 10000
+
+            if chart_df["주가"].notna().any():
+                chart_df = chart_df.dropna(subset=["주가"]).copy()
 
                 chart_spec = {
-                    "height": 220,
+                    "height": 240,
                     "layer": [
                         {
                             "mark": {"type": "line", "point": True},
                             "encoding": {
-                                "x": {"field": "date", "type": "temporal", "title": "분석일"},
+                                "x": {
+                                    "field": "분석일",
+                                    "type": "ordinal",
+                                    "title": "분석일",
+                                    "axis": {"labelAngle": -45},
+                                },
                                 "y": {
                                     "field": "종합점수",
                                     "type": "quantitative",
                                     "title": "종합점수",
-                                    "axis": {"title": "종합점수", "orient": "left"},
+                                    "scale": {"domain": [-4, 6]},
+                                    "axis": {
+                                        "title": "종합점수",
+                                        "orient": "left",
+                                        "values": [-4, -2, 0, 2, 4, 6],
+                                    },
                                 },
                                 "tooltip": [
-                                    {"field": "date", "type": "temporal", "title": "날짜"},
-                                    {"field": "종합점수", "type": "quantitative", "title": "종합점수"},
-                                    {"field": "주가", "type": "quantitative", "title": "주가", "format": ",.0f"},
+                                    {"field": "분석일", "type": "nominal", "title": "날짜"},
+                                    {"field": "종합점수", "type": "quantitative", "title": "종합점수", "format": "+d"},
+                                    {"field": "주가", "type": "quantitative", "title": "주가(원)", "format": ",.0f"},
                                 ],
                             },
                         },
                         {
                             "mark": {"type": "line", "point": True, "strokeDash": [5, 4]},
                             "encoding": {
-                                "x": {"field": "date", "type": "temporal", "title": "분석일"},
+                                "x": {
+                                    "field": "분석일",
+                                    "type": "ordinal",
+                                    "title": "분석일",
+                                    "axis": {"labelAngle": -45},
+                                },
                                 "y": {
-                                    "field": "주가",
+                                    "field": "주가_만원",
                                     "type": "quantitative",
-                                    "title": "주가(원)",
-                                    "axis": {"title": "주가(원)", "orient": "right", "format": ","},
+                                    "title": "주가(만원)",
+                                    "axis": {
+                                        "title": "주가(만원)",
+                                        "orient": "right",
+                                        "format": ",.0f",
+                                    },
                                     "scale": {"zero": False},
                                 },
                                 "tooltip": [
-                                    {"field": "date", "type": "temporal", "title": "날짜"},
-                                    {"field": "종합점수", "type": "quantitative", "title": "종합점수"},
-                                    {"field": "주가", "type": "quantitative", "title": "주가", "format": ",.0f"},
+                                    {"field": "분석일", "type": "nominal", "title": "날짜"},
+                                    {"field": "종합점수", "type": "quantitative", "title": "종합점수", "format": "+d"},
+                                    {"field": "주가", "type": "quantitative", "title": "주가(원)", "format": ",.0f"},
                                 ],
                             },
                         },
@@ -1039,9 +1068,35 @@ def render_stock_card(r: dict, favorites: list[str]) -> None:
                     "resolve": {"scale": {"y": "independent"}},
                 }
                 st.vega_lite_chart(chart_df, chart_spec, use_container_width=True)
-                st.caption("실선은 종합점수, 점선은 해당 분석일 종가입니다. 왼쪽 축은 점수, 오른쪽 축은 주가입니다.")
+                st.caption(
+                    "실선은 종합점수, 점선은 해당 분석일 종가입니다. "
+                    "왼쪽 축은 -4~+6점, 오른쪽 축은 주가(만원)입니다."
+                )
             else:
-                st.line_chart(sh_df.set_index("date")[["종합점수"]], height=160)
+                score_chart_spec = {
+                    "height": 200,
+                    "mark": {"type": "line", "point": True},
+                    "encoding": {
+                        "x": {
+                            "field": "분석일",
+                            "type": "ordinal",
+                            "title": "분석일",
+                            "axis": {"labelAngle": -45},
+                        },
+                        "y": {
+                            "field": "종합점수",
+                            "type": "quantitative",
+                            "title": "종합점수",
+                            "scale": {"domain": [-4, 6]},
+                            "axis": {"values": [-4, -2, 0, 2, 4, 6]},
+                        },
+                        "tooltip": [
+                            {"field": "분석일", "type": "nominal", "title": "날짜"},
+                            {"field": "종합점수", "type": "quantitative", "title": "종합점수", "format": "+d"},
+                        ],
+                    },
+                }
+                st.vega_lite_chart(chart_df, score_chart_spec, use_container_width=True)
                 st.caption("기존 기록에 주가가 없어 종합점수만 표시합니다. 다음 분석부터 주가가 함께 표시됩니다.")
 
             trend = hist_module.compute_trend(r["code"], days=30)
