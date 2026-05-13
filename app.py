@@ -978,67 +978,69 @@ def render_stock_card(r: dict, favorites: list[str]) -> None:
             st.markdown("**최근 120일 종가 / 20일선 / 60일선**")
             st.line_chart(hist, height=240)
 
-        # 점수 히스토리 (30일 추세)
-       score_hist = hist_module.get_history(r["code"], days=30)
-st.markdown("** 최근 30일 종합점수 / 주가 추세**")
+        # 점수 히스토리 (30일 추세) + 해당 분석일 주가
+        score_hist = hist_module.get_history(r["code"], days=30)
+        st.markdown("**📊 최근 30일 종합점수 / 주가 추세**")
+        if len(score_hist) >= 2:
+            sh_df = pd.DataFrame(score_hist).copy()
 
-if len(score_hist) >= 2:
-    sh_df = pd.DataFrame(score_hist).copy()
+            sh_df["date"] = pd.to_datetime(sh_df["date"], errors="coerce")
+            sh_df["종합점수"] = pd.to_numeric(sh_df["total"], errors="coerce")
+            if "close" in sh_df.columns:
+                sh_df["주가"] = pd.to_numeric(sh_df["close"], errors="coerce")
+            else:
+                sh_df["주가"] = pd.NA
 
-    # 날짜, 점수, 주가 데이터 정리
-    sh_df["date"] = pd.to_datetime(sh_df["date"])
-    sh_df["종합점수"] = pd.to_numeric(sh_df["total"], errors="coerce")
-    sh_df["주가"] = pd.to_numeric(sh_df.get("close"), errors="coerce")
-    sh_df = sh_df.dropna(subset=["date", "종합점수"]).sort_values("date")
+            sh_df = sh_df.dropna(subset=["date", "종합점수"]).sort_values("date")
 
-    # 종합점수 라인
-    score_line = (
-        alt.Chart(sh_df)
-        .mark_line(point=True)
-        .encode(
-            x=alt.X("date:T", title="분석일"),
-            y=alt.Y("종합점수:Q", title="종합점수"),
-            tooltip=[
-                alt.Tooltip("date:T", title="날짜", format="%Y-%m-%d"),
-                alt.Tooltip("종합점수:Q", title="종합점수", format="+d"),
-            ],
-        )
-    )
-
-    # 주가 라인
-    price_df = sh_df.dropna(subset=["주가"])
-
-    if not price_df.empty:
-        price_line = (
-            alt.Chart(price_df)
-            .mark_line(point=True, strokeDash=[5, 4])
-            .encode(
-                x=alt.X("date:T", title="분석일"),
-                y=alt.Y(
-                    "주가:Q",
-                    title="주가(원)",
-                    axis=alt.Axis(format=","),
-                    scale=alt.Scale(zero=False),
-                ),
-                tooltip=[
-                    alt.Tooltip("date:T", title="날짜", format="%Y-%m-%d"),
-                    alt.Tooltip("주가:Q", title="주가", format=",.0f"),
-                ],
+            score_line = (
+                alt.Chart(sh_df)
+                .mark_line(point=True)
+                .encode(
+                    x=alt.X("date:T", title="분석일"),
+                    y=alt.Y(
+                        "종합점수:Q",
+                        title="종합점수",
+                        axis=alt.Axis(title="종합점수", orient="left"),
+                    ),
+                    tooltip=[
+                        alt.Tooltip("date:T", title="날짜", format="%Y-%m-%d"),
+                        alt.Tooltip("종합점수:Q", title="종합점수", format="+.0f"),
+                    ],
+                )
             )
-        )
 
-        chart = (
-            alt.layer(score_line, price_line)
-            .resolve_scale(y="independent")
-            .properties(height=220)
-        )
+            price_df = sh_df.dropna(subset=["주가"])
+            if not price_df.empty:
+                price_line = (
+                    alt.Chart(price_df)
+                    .mark_line(point=True, strokeDash=[5, 4])
+                    .encode(
+                        x=alt.X("date:T", title="분석일"),
+                        y=alt.Y(
+                            "주가:Q",
+                            title="주가(원)",
+                            axis=alt.Axis(title="주가(원)", orient="right", format=","),
+                            scale=alt.Scale(zero=False),
+                        ),
+                        tooltip=[
+                            alt.Tooltip("date:T", title="날짜", format="%Y-%m-%d"),
+                            alt.Tooltip("주가:Q", title="주가", format=",.0f"),
+                        ],
+                    )
+                )
 
-        st.altair_chart(chart, use_container_width=True)
-        st.caption("실선은 종합점수, 점선은 해당 분석일 종가입니다. 왼쪽 축은 점수, 오른쪽 축은 주가입니다.")
+                chart = (
+                    alt.layer(score_line, price_line)
+                    .resolve_scale(y="independent")
+                    .properties(height=220)
+                )
+                st.altair_chart(chart, use_container_width=True)
+                st.caption("실선은 종합점수, 점선은 해당 분석일 종가입니다. 왼쪽 축은 점수, 오른쪽 축은 주가입니다.")
+            else:
+                st.line_chart(sh_df.set_index("date")[["종합점수"]], height=160)
+                st.caption("기존 기록에 주가가 없어 종합점수만 표시합니다. 다음 분석부터 주가가 함께 표시됩니다.")
 
-    else:
-        st.line_chart(sh_df.set_index("date")[["종합점수"]], height=160)
-        st.caption("기존 기록에 주가가 없어서 종합점수만 표시합니다. 다음 분석부터 주가가 함께 표시됩니다.")
             trend = hist_module.compute_trend(r["code"], days=30)
             if trend:
                 delta = trend["delta"]
@@ -1055,13 +1057,16 @@ if len(score_hist) >= 2:
                 else:
                     st.caption(f"→ 변화 없음 · {trend['days_recorded']}회 분석 기록")
         elif len(score_hist) == 1:
+            close_text = ""
+            if score_hist[0].get("close") is not None:
+                close_text = f", 주가 {score_hist[0]['close']:,.0f}원"
             st.info(
                 f"📌 오늘 분석 1회 기록됨 (`{score_hist[0]['date']}`, "
-                f"{score_hist[0]['total']:+d}점). **내일 한 번 더 분석하면 추세 차트가 표시됩니다.**"
+                f"{score_hist[0]['total']:+d}점{close_text}). **내일 한 번 더 분석하면 추세 차트가 표시됩니다.**"
             )
         else:
             st.caption(
-                "분석할 때마다 자동으로 종합점수가 기록됩니다. "
+                "분석할 때마다 자동으로 종합점수와 주가가 기록됩니다. "
                 "2일 이상 누적되면 추세 차트가 표시됩니다."
             )
 
