@@ -1552,13 +1552,20 @@ if st.session_state.get("_view_mode") == "screening_history":
             st.info("필터 조건에 맞는 종목이 없습니다.")
         else:
             df = pd.DataFrame(rows)
-            event = st.dataframe(
+            df.insert(0, "선택", False)
+
+            edited_df = st.data_editor(
                 df,
                 use_container_width=True,
                 hide_index=True,
-                on_select="rerun",
-                selection_mode="single-row",
+                key="screening_pick_editor",
+                disabled=[c for c in df.columns if c != "선택"],
                 column_config={
+                    "선택": st.column_config.CheckboxColumn(
+                        "선택",
+                        help="분석하고 싶은 종목만 체크하세요",
+                        width="small",
+                    ),
                     "점수": st.column_config.NumberColumn(format="%+d"),
                     "점수변화": st.column_config.NumberColumn(format="%+d"),
                     "주가(원)": st.column_config.NumberColumn(format="%,.0f"),
@@ -1580,7 +1587,31 @@ if st.session_state.get("_view_mode") == "screening_history":
                     ),
                 },
             )
-            st.caption("종목 행을 클릭하면 해당 종목 단독 분석으로 이동합니다.")
+
+            selected_screen_codes: list[str] = []
+            if isinstance(edited_df, pd.DataFrame) and "선택" in edited_df.columns:
+                for idx, checked in enumerate(edited_df["선택"].fillna(False).tolist()):
+                    if bool(checked) and idx < len(code_order):
+                        selected_screen_codes.append(code_order[idx])
+
+            a_col1, a_col2 = st.columns([1, 2])
+            with a_col1:
+                if st.button(
+                    f"🔍 선택한 종목만 분석 ({len(selected_screen_codes)}개)",
+                    key="analyze_selected_screening_rows",
+                    use_container_width=True,
+                    type="primary",
+                    disabled=len(selected_screen_codes) == 0,
+                    help="체크한 종목만 현재 시세·재무·공시 기준으로 다시 분석합니다.",
+                ):
+                    st.session_state["_selected_screen_codes"] = selected_screen_codes
+                    st.session_state.pop("_view_mode", None)
+                    st.rerun()
+            with a_col2:
+                st.caption(
+                    "왼쪽 체크박스에서 원하는 종목만 고른 뒤 분석하세요. "
+                    "1개만 체크하면 단독 분석처럼 볼 수 있고, 여러 개를 체크하면 비교표와 상세 분석이 함께 나옵니다."
+                )
 
             latest_new = [r for r in rows if str(r.get("구분", "")).startswith("🆕")]
             latest_dropped = [r for r in rows if str(r.get("구분", "")).startswith("⚠️")]
@@ -1599,19 +1630,12 @@ if st.session_state.get("_view_mode") == "screening_history":
                         "이전 기록은 '최종 통과 목록에 없음'처럼 단순 표시될 수 있습니다."
                     )
 
-            # 행 클릭 → 분석 화면
-            if event and event.selection.rows:
-                sel_idx = event.selection.rows[0]
-                if sel_idx < len(code_order):
-                    st.session_state["_focus_code"] = code_order[sel_idx]
-                    st.session_state.pop("_view_mode", None)
-                    st.rerun()
-
     st.stop()  # 이 뷰만 보여주고 아래 일반 분석 흐름은 실행 안 함
 
 
 focus_code = st.session_state.pop("_focus_code", None)
 analyze_favs_only = st.session_state.pop("_analyze_favs_only", False)
+selected_screen_codes = st.session_state.pop("_selected_screen_codes", [])
 screen_req = st.session_state.pop("_screen", None)
 auto_run = st.session_state.pop("_auto_run_analyze", False)
 
@@ -1832,6 +1856,20 @@ if screen_req:
                 )
         st.session_state.results = results
 
+elif selected_screen_codes:
+    selected_screen_codes = [str(c).zfill(6) for c in selected_screen_codes if str(c).strip()]
+    if not selected_screen_codes:
+        st.warning("선택된 종목이 없습니다.")
+    else:
+        cached_analyze.clear()
+        st.subheader("🔍 선택 종목 분석 결과")
+        with st.spinner(f"선택한 {len(selected_screen_codes)}개 종목 분석 중..."):
+            results = [cached_analyze(c) for c in selected_screen_codes]
+            st.session_state.results = results
+        st.info(
+            f"📌 최근 스크리닝 후보에서 체크한 **{len(selected_screen_codes)}개** 종목만 분석했습니다. "
+            "다른 종목을 고르려면 사이드바의 **최근 스크리닝 후보**로 다시 들어가세요."
+        )
 elif focus_code:
     name = stock_dict.get(focus_code, focus_code)
     with st.spinner(f"{name} 분석 중..."):
