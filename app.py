@@ -358,14 +358,24 @@ with st.sidebar:
 
     min_score = st.slider("최소 종합점수", -10, 10, 0, 1, key="screen_min_score")
 
-    # 시간 추정 — 1차 스크리닝(공시 분류·잠정실적·뉴스, 깊이 분석 X) + 2차 깊이 분석
-    est_codes = len(get_universe_codes(universe))
-    est_pass1_sec = est_codes * 8 / 3
-    est_min = max(1, round(est_pass1_sec / 60))
-    st.caption(
-        f"⏱️ 1차 스크리닝 약 {est_min}분 예상 "
-        f"({est_codes}개 ÷ 3병렬). 통과 종목엔 추가 깊이 분석 자동 실행."
-    )
+    # 시간 추정 — KRX 종목 목록 서버가 불안정해도 앱 전체가 멈추지 않도록 보호
+    try:
+        est_codes = len(get_universe_codes(universe))
+    except Exception:
+        est_codes = 0
+
+    if est_codes > 0:
+        est_pass1_sec = est_codes * 8 / 3
+        est_min = max(1, round(est_pass1_sec / 60))
+        st.caption(
+            f"⏱️ 1차 스크리닝 약 {est_min}분 예상 "
+            f"({est_codes}개 ÷ 3병렬). 통과 종목엔 추가 깊이 분석 자동 실행."
+        )
+    else:
+        st.caption(
+            "⏱️ 현재 KRX 종목 목록을 불러오지 못해 예상 시간을 계산하지 못했습니다. "
+            "관심 종목 분석은 계속 사용할 수 있고, 종목 발굴은 잠시 후 다시 시도하세요."
+        )
 
     if st.button("🔍 발굴 시작", use_container_width=True, key="run_screen"):
         st.session_state["_screen"] = {
@@ -1504,11 +1514,25 @@ if screen_req:
     universe = screen_req["universe"]
     min_score = screen_req["min_score"]
     use_lite = False  # 항상 풀 모드 (lite 모드 제거됨)
-    codes = get_universe_codes(universe)
     label = UNIVERSE_LABELS.get(universe, universe)
 
+    universe_error = None
+    try:
+        codes = get_universe_codes(universe)
+    except Exception as e:
+        codes = []
+        universe_error = e
+
     st.subheader(f"🔍 발굴 결과 — {label}")
-    if not codes:
+    if universe_error is not None:
+        st.error(
+            "KRX 종목 목록을 가져오지 못했습니다. FinanceDataReader/KRX 쪽 데이터 서버가 "
+            "잠시 불안정할 때 발생합니다. 관심 종목 분석은 계속 사용할 수 있으니, "
+            "종목 발굴은 몇 분 뒤 다시 눌러주세요."
+        )
+        with st.expander("오류 상세 보기"):
+            st.code(str(universe_error))
+    elif not codes:
         st.error("유니버스 종목 목록을 가져오지 못했습니다.")
     else:
         st.caption("1단계: 전체 분석 (공시 분류 + 잠정실적 + 뉴스)")
