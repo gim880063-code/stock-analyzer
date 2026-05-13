@@ -695,8 +695,157 @@ def cached_analyze(code: str, lite: bool = False, deep_top: int = 3) -> dict:
     return analyze(code, lite=lite, deep_top=deep_top)
 
 
+def _pct(done: int, total: int) -> int:
+    if total <= 0:
+        return 100
+    return max(0, min(100, round(done / total * 100)))
+
+
+CUTE_LOADING_ARTS = [
+    {
+        "name": "곰돌이",
+        "grid": [
+            ["▫️", "▫️", "🟫", "▫️", "▫️", "🟫", "▫️", "▫️"],
+            ["▫️", "🟫", "🟫", "🟫", "🟫", "🟫", "🟫", "▫️"],
+            ["🟫", "⬛", "🟫", "🟫", "🟫", "🟫", "⬛", "🟫"],
+            ["🟫", "🟫", "🟫", "⬛", "⬛", "🟫", "🟫", "🟫"],
+            ["🟫", "🩷", "🟫", "🟫", "🟫", "🟫", "🩷", "🟫"],
+            ["🟫", "🟫", "🟫", "🟨", "🟨", "🟫", "🟫", "🟫"],
+            ["▫️", "🟫", "🟫", "🟫", "🟫", "🟫", "🟫", "▫️"],
+            ["▫️", "▫️", "🟫", "▫️", "▫️", "🟫", "▫️", "▫️"],
+        ],
+    },
+    {
+        "name": "병아리",
+        "grid": [
+            ["▫️", "▫️", "🟨", "🟨", "🟨", "🟨", "▫️", "▫️"],
+            ["▫️", "🟨", "🟨", "🟨", "🟨", "🟨", "🟨", "▫️"],
+            ["🟨", "⬛", "🟨", "🟨", "🟨", "🟨", "⬛", "🟨"],
+            ["🟨", "🟨", "🟨", "🟧", "🟧", "🟨", "🟨", "🟨"],
+            ["🟨", "🩷", "🟨", "🟨", "🟨", "🟨", "🩷", "🟨"],
+            ["▫️", "🟨", "🟨", "🟨", "🟨", "🟨", "🟨", "▫️"],
+            ["▫️", "▫️", "🟨", "🟨", "🟨", "🟨", "▫️", "▫️"],
+            ["▫️", "▫️", "🟧", "▫️", "▫️", "🟧", "▫️", "▫️"],
+        ],
+    },
+    {
+        "name": "토끼",
+        "grid": [
+            ["▫️", "▫️", "🐰", "▫️", "▫️", "🐰", "▫️", "▫️"],
+            ["▫️", "▫️", "🐰", "▫️", "▫️", "🐰", "▫️", "▫️"],
+            ["▫️", "🐰", "🐰", "🐰", "🐰", "🐰", "🐰", "▫️"],
+            ["🐰", "⬛", "🐰", "🐰", "🐰", "🐰", "⬛", "🐰"],
+            ["🐰", "🐰", "🐰", "⬛", "⬛", "🐰", "🐰", "🐰"],
+            ["🐰", "🩷", "🐰", "🐰", "🐰", "🐰", "🩷", "🐰"],
+            ["▫️", "🐰", "🐰", "🟨", "🟨", "🐰", "🐰", "▫️"],
+            ["▫️", "▫️", "🐰", "🐰", "🐰", "🐰", "▫️", "▫️"],
+        ],
+    },
+]
+
+
+def _pick_loading_art(seed: str):
+    seed = seed or "loading"
+    idx = sum(ord(ch) for ch in seed) % len(CUTE_LOADING_ARTS)
+    return CUTE_LOADING_ARTS[idx]
+
+
+def _render_loading_art(art_box, percent: int, label: str, detail: str = "", art_seed: str = "loading") -> None:
+    if art_box is None:
+        return
+
+    art = _pick_loading_art(art_seed)
+    grid = art["grid"]
+    total_cells = sum(len(row) for row in grid)
+    reveal_count = round(total_cells * max(0, min(100, percent)) / 100)
+
+    non_bg = []
+    bg = []
+    for r, row in enumerate(grid):
+        for c, cell in enumerate(row):
+            if cell == "▫️":
+                bg.append((r, c))
+            else:
+                non_bg.append((r, c))
+    reveal_order = non_bg + bg
+    visible = set(reveal_order[:reveal_count])
+    covered = "🟪"
+
+    rendered_rows = []
+    for r, row in enumerate(grid):
+        rendered_rows.append(" ".join(cell if (r, c) in visible else covered for c, cell in enumerate(row)))
+
+    sub = f"{percent}% 완성"
+    if detail:
+        sub += f" · {detail}"
+    title = f"🎨 로딩중... {art['name']}가 나타나는 중"
+    html = f"""
+    <div style="padding:0.85rem 1rem; margin:0.35rem 0 0.2rem 0; border:1px solid #f0e6ff; border-radius:16px; background:linear-gradient(135deg,#fff8fd,#f7f9ff);">
+        <div style="font-weight:700; font-size:0.98rem; margin-bottom:0.35rem;">{title}</div>
+        <div style="font-size:1.38rem; line-height:1.1; letter-spacing:0.02rem;">{'<br>'.join(rendered_rows)}</div>
+        <div style="margin-top:0.45rem; color:#666; font-size:0.86rem;">{label} · {sub}</div>
+    </div>
+    """
+    art_box.markdown(html, unsafe_allow_html=True)
+
+
+def _progress_update(
+    progress_bar,
+    status_box,
+    done: int,
+    total: int,
+    label: str,
+    detail: str = "",
+    art_box=None,
+    art_seed: str = "loading",
+) -> None:
+    percent = _pct(done, total)
+    progress_bar.progress(done / total if total else 1.0)
+    msg = f"{label} {percent}% ({done}/{total})"
+    if detail:
+        msg += f" · {detail}"
+    status_box.caption(msg)
+    _render_loading_art(art_box, percent, label, detail, art_seed)
+
+
+def run_analysis_with_progress(
+    codes: list[str],
+    label: str = "분석 중",
+    lite: bool = False,
+    deep_top: int = 3,
+    clear_cache: bool = False,
+) -> list[dict]:
+    """선택/즐겨찾기/관심종목 분석용 진행률 표시 공통 함수."""
+    clean_codes = [str(c).zfill(6) for c in codes if str(c).strip()]
+    total = len(clean_codes)
+    if total == 0:
+        return []
+
+    if clear_cache:
+        cached_analyze.clear()
+
+    art_box = st.empty()
+    progress_bar = st.progress(0)
+    status_box = st.empty()
+    art_seed = f"{label}-analysis"
+    _progress_update(progress_bar, status_box, 0, total, label, "준비 중", art_box, art_seed)
+
+    analyzed: list[dict] = []
+    try:
+        for idx, code in enumerate(clean_codes, start=1):
+            name = stock_dict.get(code, code)
+            _progress_update(progress_bar, status_box, idx - 1, total, label, f"현재 분석: {name} ({code})", art_box, art_seed)
+            analyzed.append(cached_analyze(code, lite=lite, deep_top=deep_top))
+            _progress_update(progress_bar, status_box, idx, total, label, f"완료: {name} ({code})", art_box, art_seed)
+    finally:
+        progress_bar.empty()
+        status_box.empty()
+
+    return analyzed
+
+
 # 분석 로직이 바뀔 때마다 이 버전을 올려서 기존 캐시를 무효화
-ANALYZER_VERSION = "v24-2026-05-10-gist-storage"
+ANALYZER_VERSION = "v25-2026-05-13-progress-percent"
 if st.session_state.get("_analyzer_cache_version") != ANALYZER_VERSION:
     cached_analyze.clear()
     st.session_state["_analyzer_cache_version"] = ANALYZER_VERSION
@@ -1356,8 +1505,10 @@ if st.session_state.get("_view_mode") == "screening_history":
         )
 
         st.caption(f"1단계: {n_codes}개 종목 재분석")
+        art1 = st.empty()
         p1 = st.progress(0)
         s1 = st.empty()
+        _progress_update(p1, s1, 0, n_codes, "1단계 재분석", "준비 중", art1, "refresh-stage1")
         refreshed: list[dict] = []
         errs = 0
 
@@ -1378,13 +1529,24 @@ if st.session_state.get("_view_mode") == "screening_history":
                     except Exception:
                         errs += 1
                     done += 1
-                    p1.progress(done / n_codes)
-                    s1.caption(f"{done}/{n_codes}: {stock_dict.get(c, c)} ({c})")
+                    _progress_update(
+                        p1,
+                        s1,
+                        done,
+                        n_codes,
+                        "1단계 재분석",
+                        f"완료: {stock_dict.get(c, c)} ({c})",
+                        art1,
+                        "refresh-stage1",
+                    )
 
             # 2단계: 깊이 분석 + 점수 재계산
             if refreshed:
                 s1.caption(f"2단계: {len(refreshed)}개 정밀 분석 중")
+                art2 = st.empty()
                 p2 = st.progress(0)
+                s2 = st.empty()
+                _progress_update(p2, s2, 0, len(refreshed), "2단계 정밀 분석", "준비 중", art2, "refresh-stage2")
 
                 def _enrich(r):
                     enrich_with_deep_analysis(r, top_n=3)
@@ -1399,8 +1561,19 @@ if st.session_state.get("_view_mode") == "screening_history":
                         except Exception:
                             pass
                         d_done += 1
-                        p2.progress(d_done / len(refreshed))
+                        rr = dfuts[f]
+                        _progress_update(
+                            p2,
+                            s2,
+                            d_done,
+                            len(refreshed),
+                            "2단계 정밀 분석",
+                            f"완료: {rr.get('name', rr.get('code', ''))} ({rr.get('code', '')})",
+                            art2,
+                            "refresh-stage2",
+                        )
                 p2.empty()
+                s2.empty()
         finally:
             try:
                 hist_module.commit_batch()
@@ -1666,8 +1839,10 @@ if screen_req:
         st.error("유니버스 종목 목록을 가져오지 못했습니다.")
     else:
         st.caption("1단계: 전체 분석 (공시 분류 + 잠정실적 + 뉴스)")
+        art_screen1 = st.empty()
         progress = st.progress(0)
         status = st.empty()
+        _progress_update(progress, status, 0, len(codes), "1단계 스크리닝", "준비 중", art_screen1, "screening-stage1")
         screened: list[dict] = []
         errors = 0
         max_workers = 3
@@ -1694,9 +1869,17 @@ if screen_req:
                     except Exception:
                         errors += 1
                     completed += 1
-                    progress.progress(completed / len(codes))
                     nm = stock_dict.get(c, c)
-                    status.caption(f"분석 중 ({completed}/{len(codes)}): {nm} ({c})")
+                    _progress_update(
+                        progress,
+                        status,
+                        completed,
+                        len(codes),
+                        "1단계 스크리닝",
+                        f"완료: {nm} ({c})",
+                        art_screen1,
+                        "screening-stage1",
+                    )
         finally:
             # 정상 종료든 예외든 항상 누적된 히스토리를 한 번에 저장
             try:
@@ -1746,7 +1929,10 @@ if screen_req:
         if results:
             from analyzer import enrich_with_deep_analysis, recompute_score_after_deep
             st.caption(f"2단계: 통과 {len(results)}개 종목 정밀 분석 중...")
+            art_screen2 = st.empty()
             deep_progress = st.progress(0)
+            deep_status = st.empty()
+            _progress_update(deep_progress, deep_status, 0, len(results), "2단계 정밀 분석", "준비 중", art_screen2, "screening-stage2")
 
             def _enrich_and_recompute(r: dict) -> None:
                 enrich_with_deep_analysis(r, top_n=3)
@@ -1763,8 +1949,19 @@ if screen_req:
                     except Exception:
                         pass
                     deep_done += 1
-                    deep_progress.progress(deep_done / len(results))
+                    rr = deep_futures[future]
+                    _progress_update(
+                        deep_progress,
+                        deep_status,
+                        deep_done,
+                        len(results),
+                        "2단계 정밀 분석",
+                        f"완료: {rr.get('name', rr.get('code', ''))} ({rr.get('code', '')})",
+                        art_screen2,
+                        "screening-stage2",
+                    )
             deep_progress.empty()
+            deep_status.empty()
 
             # 깊이 분석 결과로 점수가 떨어진 종목 제거 (재필터)
             pre_filter_results = list(results)
@@ -1861,29 +2058,35 @@ elif selected_screen_codes:
     if not selected_screen_codes:
         st.warning("선택된 종목이 없습니다.")
     else:
-        cached_analyze.clear()
         st.subheader("🔍 선택 종목 분석 결과")
-        with st.spinner(f"선택한 {len(selected_screen_codes)}개 종목 분석 중..."):
-            results = [cached_analyze(c) for c in selected_screen_codes]
-            st.session_state.results = results
+        results = run_analysis_with_progress(
+            selected_screen_codes,
+            label="선택 종목 분석",
+            clear_cache=True,
+        )
+        st.session_state.results = results
         st.info(
             f"📌 최근 스크리닝 후보에서 체크한 **{len(selected_screen_codes)}개** 종목만 분석했습니다. "
             "다른 종목을 고르려면 사이드바의 **최근 스크리닝 후보**로 다시 들어가세요."
         )
 elif focus_code:
     name = stock_dict.get(focus_code, focus_code)
-    with st.spinner(f"{name} 분석 중..."):
-        results = [cached_analyze(focus_code)]
-        st.session_state.results = results
+    results = run_analysis_with_progress(
+        [focus_code],
+        label=f"{name} 단독 분석",
+    )
+    st.session_state.results = results
     st.info(f"⭐ **{name}** 단독 분석 결과입니다. 워치리스트 전체를 보려면 **🔍 분석하기**를 누르세요.")
 elif analyze_favs_only:
     favs = load_favorites()
     if not favs:
         st.warning("⭐ 즐겨찾기가 비어있습니다. 종목 카드의 ☆ 버튼으로 추가하세요.")
     else:
-        with st.spinner(f"즐겨찾기 {len(favs)}개 분석 중..."):
-            results = [cached_analyze(c) for c in favs]
-            st.session_state.results = results
+        results = run_analysis_with_progress(
+            favs,
+            label="즐겨찾기 분석",
+        )
+        st.session_state.results = results
         st.info(
             f"⭐ 즐겨찾기 **{len(favs)}개**만 분석한 결과입니다. "
             "워치리스트는 그대로이며, 워치리스트 전체를 보려면 **🔍 분석하기**를 누르세요."
@@ -1891,9 +2094,11 @@ elif analyze_favs_only:
 elif not selected_codes:
     st.info("👈 사이드바에서 분석할 종목을 선택하세요.")
 elif run_analysis or auto_run:
-    with st.spinner("종목 데이터 수집 및 점수 계산 중..."):
-        results = [cached_analyze(c) for c in selected_codes]
-        st.session_state.results = results
+    results = run_analysis_with_progress(
+        selected_codes,
+        label="관심종목 분석",
+    )
+    st.session_state.results = results
 elif "results" in st.session_state:
     results = st.session_state.results
 else:
