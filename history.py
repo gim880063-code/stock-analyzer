@@ -1,17 +1,24 @@
 """
-점수 히스토리 — 매일 분석 결과 자동 저장 + 30일 추세 계산.
+점수 히스토리 — 매일 분석 결과 자동 저장 + 추세/검증 계산.
 
 저장 위치: Gist (설정 시) + 로컬 data/score_history.json
 형식:
   {
     "005930": [
-      {"date": "2026-05-10", "total": 5, "close": 268500, "opinion": "분할 접근 가능"},
+      {
+        "date": "2026-05-10",
+        "total": 5,
+        "close": 268500,
+        "opinion": "분할 접근 가능",
+        "scores": {"추세": 1, "모멘텀": 1, "거래량": 0, "수급": 1, ...}
+      },
       ...
     ]
   }
 
+`scores` 필드는 2026-05 이후 추가됨. 그 이전 엔트리에는 없을 수 있음.
 같은 날 다시 분석하면 덮어씀 (마지막 분석값 유지).
-90일 이전 데이터는 자동 제거.
+365일 이전 데이터는 자동 제거 (검증/백테스트를 위해 1년치 보존).
 
 배치 모드: 스크리닝처럼 N종목을 연속 분석할 때, 매번 Gist에 저장하면
 API 호출이 폭주해서 느려지고 멈출 위험이 있음. begin_batch()로 시작하고
@@ -25,7 +32,7 @@ import cloud_store
 
 
 FILENAME = "score_history.json"
-RETENTION_DAYS = 90
+RETENTION_DAYS = 365
 
 _lock = threading.Lock()
 _deferred_buffer: dict[str, list[dict]] | None = None
@@ -64,24 +71,41 @@ def discard_batch() -> None:
         _deferred_buffer = None
 
 
-def record_snapshot(code: str, total: int, close: float, opinion: str) -> None:
+def record_snapshot(
+    code: str,
+    total: int,
+    close: float,
+    opinion: str,
+    scores: list[dict] | None = None,
+) -> None:
     """
-    오늘 점수 저장 (같은 날 중복은 덮어쓰기, 90일 초과는 자동 제거).
+    오늘 점수 저장 (같은 날 중복은 덮어쓰기, 365일 초과는 자동 제거).
+
+    scores: analyzer.AnalysisResult["scores"] 그대로 전달. 항목별 검증을 위해
+    {name: score} 형태로 압축 저장. None이면 저장 안 함 (구버전 호환).
 
     배치 모드 (begin_batch~commit_batch 사이): Gist 저장 안 함, 버퍼에만 추가.
     """
     today = datetime.now().strftime("%Y-%m-%d")
+    entry = {
+        "date": today,
+        "total": int(total),
+        "close": float(close),
+        "opinion": (opinion or "").split(" — ")[0],
+    }
+    if scores:
+        entry["scores"] = {
+            s["name"]: int(s["score"])
+            for s in scores
+            if isinstance(s, dict) and "name" in s and "score" in s
+        }
+
     with _lock:
         is_deferred = _deferred_buffer is not None
         history = _deferred_buffer if is_deferred else _load()
 
         entries = [e for e in history.get(code, []) if e.get("date") != today]
-        entries.append({
-            "date": today,
-            "total": int(total),
-            "close": float(close),
-            "opinion": (opinion or "").split(" — ")[0],
-        })
+        entries.append(entry)
 
         cutoff = (datetime.now() - timedelta(days=RETENTION_DAYS)).strftime("%Y-%m-%d")
         entries = [e for e in entries if e.get("date", "") >= cutoff]
@@ -95,6 +119,11 @@ def record_snapshot(code: str, total: int, close: float, opinion: str) -> None:
 def get_history(code: str, days: int = 30) -> list[dict]:
     cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
     return [e for e in _load().get(code, []) if e.get("date", "") >= cutoff]
+
+
+def load_all() -> dict[str, list[dict]]:
+    """전체 종목의 히스토리 로드 — 검증/백테스트용."""
+    return _load()
 
 
 def compute_trend(code: str, days: int = 30) -> dict | None:

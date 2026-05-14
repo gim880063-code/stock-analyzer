@@ -18,6 +18,7 @@ import portfolio as port
 import history as hist_module
 import cloud_store
 import screening_history
+import scouted
 
 
 DEFAULT_WATCHLIST = ["005930", "000660", "035420"]
@@ -313,6 +314,16 @@ with st.sidebar:
             port.add_holding(code, port_qty, port_price)
             st.success(f"{stock_dict.get(code, code)} 저장됨")
             st.rerun()
+
+    # ─────────── 점수 시뮬레이션 진입점 ───────────
+    if st.button(
+        "📊 점수 시뮬레이션 — 발굴 종목 가상 수익률",
+        key="open_verifier",
+        use_container_width=True,
+        help="스크리닝에서 발굴된 종목을 그 시점에 가상 매수했다고 가정했을 때의 수익률",
+    ):
+        st.session_state["_view_mode"] = "verifier"
+        st.rerun()
 
     # ─────────── 스크리닝 후보 진입점 (가벼움) ───────────
     st.divider()
@@ -845,7 +856,7 @@ def run_analysis_with_progress(
 
 
 # 분석 로직이 바뀔 때마다 이 버전을 올려서 기존 캐시를 무효화
-ANALYZER_VERSION = "v25-2026-05-13-progress-percent"
+ANALYZER_VERSION = "v26-2026-05-14-short-mid-split-market-relative"
 if st.session_state.get("_analyzer_cache_version") != ANALYZER_VERSION:
     cached_analyze.clear()
     st.session_state["_analyzer_cache_version"] = ANALYZER_VERSION
@@ -869,7 +880,11 @@ def opinion_emoji(total: int) -> str:
     return "⚠️"
 
 
-SCORE_COLUMNS = ["추세", "모멘텀", "거래량", "가격 리스크", "수급", "공시", "가치", "재무 건전성", "성장성"]
+SCORE_COLUMNS = [
+    "추세", "모멘텀", "거래량", "가격 리스크",
+    "시장 상대강도", "수급", "공시",
+    "가치", "재무 건전성", "성장성",
+]
 
 
 def _cell_color(val) -> str:
@@ -910,6 +925,8 @@ def render_summary_table(results: list[dict]) -> None:
                 "현재가": "-",
                 "등락률": "-",
                 **{c: None for c in SCORE_COLUMNS},
+                "단기": None,
+                "중기": None,
                 "종합점수": None,
                 "의견": r["error"],
             }
@@ -924,13 +941,15 @@ def render_summary_table(results: list[dict]) -> None:
             "현재가": f"{r['last_close']:,.0f}원",
             "등락률": f"{r['change_pct']:+.2f}%",
             **{c: score_map.get(c) for c in SCORE_COLUMNS},
+            "단기": r.get("short_term_score"),
+            "중기": r.get("mid_term_score"),
             "종합점수": r["total"],
             "의견": r["opinion"].split(" — ")[0],
         }
         rows.append(row)
 
     df = pd.DataFrame(rows)
-    score_cols = [c for c in SCORE_COLUMNS if c in df.columns] + ["종합점수"]
+    score_cols = [c for c in SCORE_COLUMNS if c in df.columns] + ["단기", "중기", "종합점수"]
 
     styled = (
         df.style
@@ -1191,6 +1210,14 @@ def render_stock_card(r: dict, favorites: list[str]) -> None:
         m1, m2, m3 = st.columns(3)
         m1.metric("현재가", f"{r['last_close']:,.0f}원", f"{r['change_pct']:+.2f}%")
         m2.metric("종합점수", f"{r['total']:+d}점")
+        st_score = r.get("short_term_score", 0)
+        st_max = r.get("short_term_max", 0)
+        mt_score = r.get("mid_term_score", 0)
+        mt_max = r.get("mid_term_max", 0)
+        m2.caption(
+            f"단기 **{st_score:+d}**/{st_max} · 중기 **{mt_score:+d}**/{mt_max}  \n"
+            f":gray[1~4주 매매엔 단기 / 분기 보유엔 중기 점수 참고]"
+        )
         m3.metric("의견", f"{opinion_emoji(r['total'])} {r['opinion'].split(' — ')[0]}")
 
         # 보유 종목이면 손익 badge
@@ -1806,6 +1833,162 @@ if st.session_state.get("_view_mode") == "screening_history":
     st.stop()  # 이 뷰만 보여주고 아래 일반 분석 흐름은 실행 안 함
 
 
+# ─────────── 점수 시뮬레이션 뷰 모드 ───────────
+if st.session_state.get("_view_mode") == "verifier":
+    import verifier
+
+    st.subheader("📊 점수 시뮬레이션 — 점수가 실제 수익률과 맞았는가")
+    st.caption(
+        "스크리닝에서 발굴된 종목을 그 시점에 가상으로 매수했다고 가정하고 현재까지의 수익률을 추적합니다. "
+        "현재가는 가장 최근 분석된 종가 기준 — 발굴 후 한 번도 다시 분석되지 않은 종목은 빠집니다."
+    )
+
+    if st.button("← 분석 화면으로 돌아가기", key="back_from_verifier", use_container_width=False):
+        st.session_state.pop("_view_mode", None)
+        st.rerun()
+
+    tab_scout, tab_item = st.tabs([
+        "💰 발굴 종목 가상 수익률",
+        "🔬 항목별 예측력",
+    ])
+
+    def _bucket_table(bucket_stats: dict, value_label: str) -> pd.DataFrame:
+        rows = []
+        for label, st_ in bucket_stats.items():
+            rows.append({
+                "점수 구간": label,
+                "종목 수": st_["count"],
+                f"평균 {value_label}(%)": st_["avg_return"] if st_["avg_return"] is not None else "-",
+                "승률(%)": st_["win_rate"] if st_["win_rate"] is not None else "-",
+                "최고(%)": st_["best"] if st_["best"] is not None else "-",
+                "최저(%)": st_["worst"] if st_["worst"] is not None else "-",
+            })
+        return pd.DataFrame(rows)
+
+    # ─── 탭 1: 발굴 가상 수익률 ───
+    with tab_scout:
+        score_type = st.radio(
+            "점수 종류 비교 — 어느 점수가 실제 수익률을 가장 잘 예측했는지",
+            options=["total", "short_term", "mid_term"],
+            format_func=lambda t: {
+                "total": "종합 점수 (모든 항목 합)",
+                "short_term": "단기 점수 (거래량·수급·공시·시장강도)",
+                "mid_term": "중기 점수 (추세·가치·재무·성장성)",
+            }[t],
+            horizontal=True,
+            key="sim_score_type",
+            help=(
+                "단기 점수는 1~4주 매매에 효과가 학술적으로 검증된 항목만 합산. "
+                "중기 점수는 분기 이상에서 효과가 있는 항목만 합산. "
+                "모멘텀(RSI)과 가격리스크는 의심 항목이라 종합점수에만 포함되고 부분합엔 빠짐."
+            ),
+        )
+        result = verifier.verify_scouted(score_type=score_type)
+        if result["total_count"] == 0:
+            if score_type in ("short_term", "mid_term"):
+                st.info(
+                    f"`{score_type}` 점수가 기록된 발굴 종목이 없습니다. "
+                    "단기·중기 점수는 항목별 점수 스냅샷이 있어야 계산되는데, 이 기능은 "
+                    "최근 추가됐기 때문에 새로 발굴된 종목부터 데이터가 쌓입니다.\n\n"
+                    "사이드바에서 **🔍 발굴 시작**을 한 번 다시 돌려보세요."
+                )
+            else:
+                st.info(
+                    "시뮬레이션할 발굴 종목이 없습니다. 사이드바에서 **🔍 발굴 시작**을 한 번 돌리면 "
+                    "통과 종목들이 자동으로 발굴 추적에 등록되고, 이후 가격 변화가 가상 수익률로 추적됩니다."
+                )
+        else:
+            col1, col2, col3 = st.columns(3)
+            col1.metric("발굴 종목", f"{result['total_count']}개")
+            avg = result.get("overall_avg")
+            col2.metric("평균 수익률", f"{avg:+.2f}%" if avg is not None else "-")
+            wr = result.get("overall_win_rate")
+            col3.metric("승률", f"{wr}%" if wr is not None else "-")
+
+            st.markdown("##### 발굴 시점 점수 구간별 평균 수익률")
+            st.caption(
+                "→ '8점 이상에서 발굴됐던 종목들이 평균 +N% 수익이었나' 같은 통계. "
+                "위 구간 평균이 아래 구간 평균보다 일관되게 높으면 점수가 잘 맞고 있는 것."
+            )
+            st.dataframe(
+                _bucket_table(result["bucket_stats"], "수익률"),
+                hide_index=True, use_container_width=True,
+            )
+
+            st.markdown("##### 종목별 상세")
+            detail_rows = []
+            for r in result["rows"]:
+                detail_rows.append({
+                    "종목": f"{stock_dict.get(r['code'], '?')} ({r['code']})",
+                    "발굴일": r["added_at"] or "-",
+                    "발굴점수": f"{r['added_score']:+d}" if r["added_score"] is not None else "-",
+                    "발굴가": f"{r['added_close']:,.0f}",
+                    "현재가": f"{r['current_close']:,.0f}",
+                    "수익률(%)": r["return_pct"],
+                    "유니버스": r.get("universe", ""),
+                })
+            st.dataframe(pd.DataFrame(detail_rows), hide_index=True, use_container_width=True)
+
+    # ─── 탭 2: 항목별 예측력 ───
+    with tab_item:
+        st.caption(
+            "각 항목 점수가 며칠 뒤 수익률을 얼마나 잘 예측했는지. "
+            "spread = (양수 점수 평균 수익률) − (음수 점수 평균 수익률). "
+            "+면 항목이 예측력 있음, −면 반대로 작동, 0 근처면 무의미."
+        )
+        forward_days = st.radio(
+            "예측 기간",
+            options=[5, 20, 60],
+            format_func=lambda d: f"{d}일",
+            horizontal=True,
+            key="verifier_forward_days",
+            index=0,
+        )
+        item_result = verifier.verify_item_scores(forward_days=forward_days)
+        st.caption(
+            f"전체 샘플 {item_result['total_samples']:,}건 "
+            f"(종목×시점 페어, 항목별 점수 기록이 있는 일자만)"
+        )
+
+        if item_result["total_samples"] == 0:
+            st.info(
+                f"분석에 필요한 데이터가 부족합니다. 항목별 점수 저장은 오늘부터 시작되므로 "
+                f"적어도 {forward_days + 5}일 이상 매일 분석을 돌려야 의미 있는 통계가 나옵니다."
+            )
+        else:
+            ranked = item_result["ranked_items"]
+            spread_rows = []
+            for item in ranked:
+                st_ = item_result["item_stats"][item]
+                spread_rows.append({
+                    "항목": item,
+                    "예측력 spread(%p)": st_["predictive_spread"] if st_["predictive_spread"] is not None else "-",
+                    "샘플 수": st_["total_samples"],
+                })
+            st.markdown(f"##### 항목별 예측력 ({forward_days}일 뒤 수익률 기준)")
+            st.dataframe(pd.DataFrame(spread_rows), hide_index=True, use_container_width=True)
+
+            st.markdown("##### 항목 상세 — 점수값별 평균 수익률")
+            for item in ranked:
+                st_ = item_result["item_stats"][item]
+                with st.expander(
+                    f"{item}  (spread {st_['predictive_spread']:+.2f}%p, "
+                    f"{st_['total_samples']}건)" if st_["predictive_spread"] is not None
+                    else f"{item}  ({st_['total_samples']}건)"
+                ):
+                    rows = []
+                    for score_val, stat in st_["by_score"].items():
+                        rows.append({
+                            "점수값": f"{score_val:+d}",
+                            "케이스 수": stat["count"],
+                            "평균 수익률(%)": stat["avg_return"] if stat["avg_return"] is not None else "-",
+                            "승률(%)": stat["win_rate"] if stat["win_rate"] is not None else "-",
+                        })
+                    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+
+    st.stop()
+
+
 focus_code = st.session_state.pop("_focus_code", None)
 analyze_favs_only = st.session_state.pop("_analyze_favs_only", False)
 selected_screen_codes = st.session_state.pop("_selected_screen_codes", [])
@@ -1994,6 +2177,14 @@ if screen_req:
                 )
             else:
                 screening_history.record_today([r["code"] for r in results])
+        except Exception:
+            pass
+
+        # 발굴 추적 자동 등록 — 가상 매매 PnL 검증용 (verifier가 이걸로 수익률 계산)
+        # 이미 등록된 종목은 add_from_analysis가 False 반환하고 건너뜀 (최초 발굴 시점 보존)
+        try:
+            for r in results:
+                scouted.add_from_analysis(r, universe=universe)
         except Exception:
             pass
 

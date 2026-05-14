@@ -46,6 +46,19 @@ UNIVERSE_LABELS = {
 }
 
 
+# ─────────── 점수 항목 분류 ───────────
+# 시간 축이 맞는 항목끼리 부분합을 따로 계산해 매매 기간에 맞는 신호를 본다.
+# 학술·실무 근거:
+#   - 단기(1~4주) 예측력 있는 팩터: 거래량, 수급, 공시, 시장 상대강도
+#   - 중기(분기~) 예측력 있는 팩터: 추세, 가치, 재무 건전성, 성장성
+#   - 의심 항목: 모멘텀(RSI 14), 가격 리스크
+#     - RSI(14)는 학술적으로 약한 mean-reversion 신호. 한국시장에서 검증 필요.
+#     - 가격 리스크는 강세 종목을 깎아서 단기 momentum factor를 거꾸로 작용할 가능성.
+#     - 일단 종합점수엔 남기되 부분합엔 미포함 → 시뮬레이션 비교로 검증 후 거취 결정.
+SHORT_TERM_ITEMS = {"거래량", "수급", "공시", "시장 상대강도"}
+MID_TERM_ITEMS = {"추세", "가치", "재무 건전성", "성장성"}
+
+
 # 작전주·관리종목 위험 분류는 자동 제외 (KOSDAQ 우량/중견/기술성장은 정상)
 EXCLUDED_DEPTS = {
     "관리종목(소속부없음)",
@@ -146,6 +159,11 @@ class AnalysisResult(TypedDict):
     change_pct: float
     scores: list[ScoreItem]
     total: int
+    # 단기·중기 부분합 — 시간 축이 맞는 항목만 집계 (SHORT_TERM_ITEMS / MID_TERM_ITEMS)
+    short_term_score: int
+    short_term_max: int
+    mid_term_score: int
+    mid_term_max: int
     opinion: str
     error: str | None
     history: list[dict]  # [{"Date": "YYYY-MM-DD", "종가": .., "20일선": .., "60일선": ..}, ...]
@@ -467,6 +485,64 @@ def score_growth_from_preliminary(prelim: dict) -> ScoreItem | None:
     return item
 
 
+@lru_cache(maxsize=10)
+def _market_index_cached(market: str, date_key: str) -> pd.DataFrame:
+    """시장 지수 데이터 캐시 — date_key를 일별로 바꿔 매일 1회 fetch."""
+    idx_code = "KS11" if market == "KOSPI" else "KQ11"
+    end = datetime.now()
+    start = end - timedelta(days=120)
+    return fdr.DataReader(idx_code, start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"))
+
+
+def _market_index_data(market: str) -> pd.DataFrame:
+    """오늘 날짜 키로 캐시된 시장 지수 데이터."""
+    today = datetime.now().strftime("%Y-%m-%d")
+    return _market_index_cached(market, today)
+
+
+def _stock_market(code: str) -> str:
+    """종목의 시장 (KOSPI/KOSDAQ). 못 찾으면 KOSPI로."""
+    df = _krx_listing()
+    row = df[df["Code"] == code]
+    if row.empty:
+        return "KOSPI"
+    return str(row.iloc[0].get("Market", "KOSPI"))
+
+
+def score_market_relative(df: pd.DataFrame, code: str) -> ScoreItem | None:
+    """
+    시장 지수(KOSPI/KOSDAQ) 대비 종목의 20일 상대 수익률.
+
+    한국 시장에서 단기 모멘텀의 가장 검증된 신호 중 하나.
+    절대 수익률(+5%)이 시장 -3%인 날엔 사실 +8%p 초과 강세인데,
+    이 항목 없으면 점수에 안 반영됨.
+
+    ±5%p 임계는 한국시장 20일 변동성 고려한 보수적 값.
+    """
+    try:
+        market = _stock_market(code)
+        market_df = _market_index_data(market)
+    except Exception:
+        return None
+
+    if len(df) < 21 or market_df is None or len(market_df) < 21:
+        return None
+
+    stock_ret = (df["Close"].iloc[-1] / df["Close"].iloc[-21] - 1) * 100
+    market_ret = (market_df["Close"].iloc[-1] / market_df["Close"].iloc[-21] - 1) * 100
+    relative = stock_ret - market_ret
+
+    if relative >= 5:
+        score, label = 1, f"시장 대비 +{relative:.1f}%p 강세"
+    elif relative <= -5:
+        score, label = -1, f"시장 대비 {relative:.1f}%p 약세"
+    else:
+        score, label = 0, f"시장 대비 {relative:+.1f}%p 중립"
+
+    msg = f"{label} (20일, 종목 {stock_ret:+.1f}% vs {market} {market_ret:+.1f}%)"
+    return {"name": "시장 상대강도", "score": score, "msg": msg, "max": 1}
+
+
 def score_risk(df: pd.DataFrame) -> ScoreItem:
     close = df["Close"]
     ret5 = (close.iloc[-1] / close.iloc[-6] - 1) * 100
@@ -552,6 +628,33 @@ def recompute_score_after_deep(result: dict) -> None:
     max_possible = sum(s.get("max", 0) for s in scores)
     result["total"] = total
     result["opinion"] = overall_opinion(total, max_possible)
+
+    # 공시 점수 변경에 따라 단기 부분합도 재계산 (공시는 SHORT_TERM_ITEMS 소속)
+    result["short_term_score"] = sum(
+        s.get("score", 0) for s in scores if s.get("name") in SHORT_TERM_ITEMS
+    )
+    result["short_term_max"] = sum(
+        s.get("max", 0) for s in scores if s.get("name") in SHORT_TERM_ITEMS
+    )
+    result["mid_term_score"] = sum(
+        s.get("score", 0) for s in scores if s.get("name") in MID_TERM_ITEMS
+    )
+    result["mid_term_max"] = sum(
+        s.get("max", 0) for s in scores if s.get("name") in MID_TERM_ITEMS
+    )
+
+    # 깊이 분석으로 점수가 바뀌었을 수 있으니 history 스냅샷도 새 값으로 덮어씀
+    # → 검증 도구가 "사용자에게 실제로 보여진 점수" 기준으로 수익률 계산하게 됨
+    try:
+        history.record_snapshot(
+            result.get("code", ""),
+            total,
+            float(result.get("last_close", 0) or 0),
+            result.get("opinion", ""),
+            scores=scores,
+        )
+    except Exception:
+        pass
 
 
 def enrich_with_deep_analysis(result: dict, top_n: int = 3) -> None:
@@ -723,12 +826,17 @@ def analyze(code: str, lite: bool = False, deep_top: int = 3) -> AnalysisResult:
               개별 종목 단독 분석 시 기본 3으로 두면 자세한 근거·요약 받음.
     """
     name = _resolve_name(code)
+    _empty_partials = {
+        "short_term_score": 0, "short_term_max": 0,
+        "mid_term_score": 0, "mid_term_max": 0,
+    }
     try:
         df = fetch_price_data(code)
     except Exception as e:
         return {
             "code": code, "name": name, "last_date": "", "last_close": 0,
             "change_pct": 0, "scores": [], "total": 0, "opinion": "",
+            **_empty_partials,
             "error": f"데이터 조회 실패: {e}", "history": [], "disclosures": [],
             "news": [], "preliminary": None, "sources": {},
         }
@@ -737,6 +845,7 @@ def analyze(code: str, lite: bool = False, deep_top: int = 3) -> AnalysisResult:
         return {
             "code": code, "name": name, "last_date": "", "last_close": 0,
             "change_pct": 0, "scores": [], "total": 0, "opinion": "",
+            **_empty_partials,
             "error": "가격 데이터가 비어 있습니다.", "history": [], "disclosures": [],
             "news": [], "preliminary": None, "sources": {},
         }
@@ -748,6 +857,11 @@ def analyze(code: str, lite: bool = False, deep_top: int = 3) -> AnalysisResult:
         score_volume(df),
         score_risk(df),
     ]
+
+    # 시장 상대강도 (KOSPI/KOSDAQ 대비) — 단기 매매 핵심 신호
+    market_rel = score_market_relative(df, code)
+    if market_rel is not None:
+        scores.append(market_rel)
 
     flow_last_date: str | None = None
     fin_report_label: str | None = None
@@ -869,6 +983,12 @@ def analyze(code: str, lite: bool = False, deep_top: int = 3) -> AnalysisResult:
     total = sum(s["score"] for s in scores)
     max_possible = sum(s["max"] for s in scores)
 
+    # 단기·중기 부분합 — 시간 축이 맞는 항목만 합산
+    short_term_score = sum(s["score"] for s in scores if s["name"] in SHORT_TERM_ITEMS)
+    short_term_max = sum(s["max"] for s in scores if s["name"] in SHORT_TERM_ITEMS)
+    mid_term_score = sum(s["score"] for s in scores if s["name"] in MID_TERM_ITEMS)
+    mid_term_max = sum(s["max"] for s in scores if s["name"] in MID_TERM_ITEMS)
+
     # 뉴스 (참고용, 점수 영향 없음 — lite 모드는 생략)
     news_items: list[dict] = []
     if not lite:
@@ -893,8 +1013,9 @@ def analyze(code: str, lite: bool = False, deep_top: int = 3) -> AnalysisResult:
     opinion_text = overall_opinion(total, max_possible)
 
     # 매일 점수 스냅샷 저장 (같은 날 중복은 덮어씀)
+    # 항목별 점수도 함께 저장 → 검증 도구에서 어떤 항목이 예측력 있었는지 분석 가능
     try:
-        history.record_snapshot(code, total, last_close, opinion_text)
+        history.record_snapshot(code, total, last_close, opinion_text, scores=scores)
     except Exception:
         pass  # 저장 실패해도 분석은 계속
 
@@ -906,6 +1027,10 @@ def analyze(code: str, lite: bool = False, deep_top: int = 3) -> AnalysisResult:
         "change_pct": float(df["Change"].iloc[-1] * 100),
         "scores": scores,
         "total": total,
+        "short_term_score": short_term_score,
+        "short_term_max": short_term_max,
+        "mid_term_score": mid_term_score,
+        "mid_term_max": mid_term_max,
         "opinion": opinion_text,
         "error": None,
         "history": _build_history(df),
