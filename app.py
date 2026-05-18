@@ -1461,32 +1461,33 @@ def render_stock_card(r: dict, favorites: list[str]) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 백그라운드 스크리닝 러너
+# 백그라운드 러너 레지스트리 — st.cache_resource 싱글톤
 # ─────────────────────────────────────────────────────────────────────────────
-# Streamlit Cloud는 브라우저 탭이 백그라운드로 가거나 WebSocket이 끊겼다가
-# 재연결될 때 스크립트를 처음부터 다시 실행한다. 그러면 메인 스크립트에서
-# 동기적으로 돌던 스크리닝이 통째로 죽고 페이지가 초기화된다. 이를 막으려고
-# 스크리닝 자체를 별도 스레드에서 돌리고, 메인 스크립트는 그 진행 상태만
-# 폴링해서 표시한다. 모듈 레벨 dict는 스크립트 rerun과 무관하게 살아남는다.
-_SCREEN_RUNNERS: dict[str, dict] = {}
-_SCREEN_RUNNERS_LOCK = threading.Lock()
-
-
-def _get_session_id() -> str:
-    # Streamlit Cloud의 ctx.session_id가 rerun 사이 일관성이 떨어지는 경우가 있어서
-    # 개인 앱(단일 사용자)에서는 고정 키를 쓰는 게 안정적. 모듈 레벨 dict가 단일 키로
-    # 동기화돼 — 백그라운드 스레드/폴링 rerun에서 같은 러너를 항상 찾는다.
-    return "global"
+# Streamlit은 매 rerun마다 스크립트 본문을 위에서 아래로 재실행한다. 따라서
+# 모듈 레벨에서 `D: dict = {}` 라고 쓰면 rerun마다 D가 새 dict로 교체돼서,
+# 백그라운드 스레드가 채워놓은 데이터가 다음 rerun에선 사라진다.
+# st.cache_resource로 감싸면 함수 본문이 단 한 번만 실행되고 그 반환 dict가
+# 캐시돼 — 모든 rerun에서 같은 dict 객체를 받게 된다.
+@st.cache_resource(show_spinner=False)
+def _runner_registry() -> dict:
+    return {
+        "screen": None,
+        "analyze": None,
+        "refresh": None,
+        "lock": threading.Lock(),
+    }
 
 
 def _get_screen_runner() -> dict | None:
-    with _SCREEN_RUNNERS_LOCK:
-        return _SCREEN_RUNNERS.get(_get_session_id())
+    reg = _runner_registry()
+    with reg["lock"]:
+        return reg["screen"]
 
 
 def _clear_screen_runner() -> None:
-    with _SCREEN_RUNNERS_LOCK:
-        _SCREEN_RUNNERS.pop(_get_session_id(), None)
+    reg = _runner_registry()
+    with reg["lock"]:
+        reg["screen"] = None
 
 
 def _screen_worker(runner: dict, stock_dict_local: dict[str, str]) -> None:
@@ -1686,9 +1687,9 @@ def _start_screen_runner(
         "finished_at": None,
         "_cancel": False,
     }
-    sid = _get_session_id()
-    with _SCREEN_RUNNERS_LOCK:
-        _SCREEN_RUNNERS[sid] = runner
+    reg = _runner_registry()
+    with reg["lock"]:
+        reg["screen"] = runner
 
     def _work():
         try:
@@ -1701,7 +1702,7 @@ def _start_screen_runner(
             if runner["status"] == "running":
                 runner["status"] = "done"
 
-    t = threading.Thread(target=_work, daemon=True, name=f"screen-{sid[:8]}")
+    t = threading.Thread(target=_work, daemon=True, name="screen-worker")
     try:
         from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ctx
         add_script_run_ctx(t, get_script_run_ctx())
@@ -1714,20 +1715,16 @@ def _start_screen_runner(
 # ─────────────────────────────────────────────────────────────────────────────
 # 백그라운드 일반 분석 러너 — 관심종목/즐겨찾기/단독/선택 종목 분석용
 # ─────────────────────────────────────────────────────────────────────────────
-# 동일한 이유로(스크립트 rerun에 죽지 않도록) 분석도 별도 스레드에서 돌린다.
-# 화면 전환/탭 백그라운드/새로고침 모두 분석을 죽이지 않음.
-_ANALYZE_RUNNERS: dict[str, dict] = {}
-_ANALYZE_RUNNERS_LOCK = threading.Lock()
-
-
 def _get_analyze_runner() -> dict | None:
-    with _ANALYZE_RUNNERS_LOCK:
-        return _ANALYZE_RUNNERS.get(_get_session_id())
+    reg = _runner_registry()
+    with reg["lock"]:
+        return reg["analyze"]
 
 
 def _clear_analyze_runner() -> None:
-    with _ANALYZE_RUNNERS_LOCK:
-        _ANALYZE_RUNNERS.pop(_get_session_id(), None)
+    reg = _runner_registry()
+    with reg["lock"]:
+        reg["analyze"] = None
 
 
 def _analyze_worker(runner: dict, stock_dict_local: dict[str, str]) -> None:
@@ -1825,9 +1822,9 @@ def _start_analyze_runner(
         "finished_at": None,
         "_cancel": False,
     }
-    sid = _get_session_id()
-    with _ANALYZE_RUNNERS_LOCK:
-        _ANALYZE_RUNNERS[sid] = runner
+    reg = _runner_registry()
+    with reg["lock"]:
+        reg["analyze"] = runner
 
     sd = stock_dict_local if stock_dict_local is not None else {}
 
@@ -1842,7 +1839,7 @@ def _start_analyze_runner(
             if runner["status"] == "running":
                 runner["status"] = "done"
 
-    t = threading.Thread(target=_work, daemon=True, name=f"analyze-{sid[:8]}")
+    t = threading.Thread(target=_work, daemon=True, name="analyze-worker")
     try:
         from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ctx
         add_script_run_ctx(t, get_script_run_ctx())
@@ -1855,18 +1852,16 @@ def _start_analyze_runner(
 # ─────────────────────────────────────────────────────────────────────────────
 # 백그라운드 추적 종목 재분석 러너 — '최근 스크리닝 후보' 뷰의 '모두 다시 분석'
 # ─────────────────────────────────────────────────────────────────────────────
-_REFRESH_RUNNERS: dict[str, dict] = {}
-_REFRESH_RUNNERS_LOCK = threading.Lock()
-
-
 def _get_refresh_runner() -> dict | None:
-    with _REFRESH_RUNNERS_LOCK:
-        return _REFRESH_RUNNERS.get(_get_session_id())
+    reg = _runner_registry()
+    with reg["lock"]:
+        return reg["refresh"]
 
 
 def _clear_refresh_runner() -> None:
-    with _REFRESH_RUNNERS_LOCK:
-        _REFRESH_RUNNERS.pop(_get_session_id(), None)
+    reg = _runner_registry()
+    with reg["lock"]:
+        reg["refresh"] = None
 
 
 def _refresh_worker(runner: dict, stock_dict_local: dict[str, str]) -> None:
@@ -1970,9 +1965,9 @@ def _start_refresh_runner(
         "finished_at": None,
         "_cancel": False,
     }
-    sid = _get_session_id()
-    with _REFRESH_RUNNERS_LOCK:
-        _REFRESH_RUNNERS[sid] = runner
+    reg = _runner_registry()
+    with reg["lock"]:
+        reg["refresh"] = runner
 
     def _work():
         try:
@@ -1985,7 +1980,7 @@ def _start_refresh_runner(
             if runner["status"] == "running":
                 runner["status"] = "done"
 
-    t = threading.Thread(target=_work, daemon=True, name=f"refresh-{sid[:8]}")
+    t = threading.Thread(target=_work, daemon=True, name="refresh-worker")
     try:
         from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ctx
         add_script_run_ctx(t, get_script_run_ctx())
