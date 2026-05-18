@@ -2,6 +2,8 @@
 주식 분석 리포트 - Streamlit 웹 앱
 """
 import json
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -819,42 +821,6 @@ def _progress_update(
     _render_loading_art(art_box, percent, label, detail, art_seed)
 
 
-def run_analysis_with_progress(
-    codes: list[str],
-    label: str = "분석 중",
-    lite: bool = False,
-    deep_top: int = 3,
-    clear_cache: bool = False,
-) -> list[dict]:
-    """선택/즐겨찾기/관심종목 분석용 진행률 표시 공통 함수."""
-    clean_codes = [str(c).zfill(6) for c in codes if str(c).strip()]
-    total = len(clean_codes)
-    if total == 0:
-        return []
-
-    if clear_cache:
-        cached_analyze.clear()
-
-    art_box = st.empty()
-    progress_bar = st.progress(0)
-    status_box = st.empty()
-    art_seed = f"{label}-analysis"
-    _progress_update(progress_bar, status_box, 0, total, label, "준비 중", art_box, art_seed)
-
-    analyzed: list[dict] = []
-    try:
-        for idx, code in enumerate(clean_codes, start=1):
-            name = stock_dict.get(code, code)
-            _progress_update(progress_bar, status_box, idx - 1, total, label, f"현재 분석: {name} ({code})", art_box, art_seed)
-            analyzed.append(cached_analyze(code, lite=lite, deep_top=deep_top))
-            _progress_update(progress_bar, status_box, idx, total, label, f"완료: {name} ({code})", art_box, art_seed)
-    finally:
-        progress_bar.empty()
-        status_box.empty()
-
-    return analyzed
-
-
 # 분석 로직이 바뀔 때마다 이 버전을 올려서 기존 캐시를 무효화
 ANALYZER_VERSION = "v26-2026-05-14-short-mid-split-market-relative"
 if st.session_state.get("_analyzer_cache_version") != ANALYZER_VERSION:
@@ -1493,6 +1459,543 @@ def render_stock_card(r: dict, favorites: list[str]) -> None:
                 )
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 백그라운드 스크리닝 러너
+# ─────────────────────────────────────────────────────────────────────────────
+# Streamlit Cloud는 브라우저 탭이 백그라운드로 가거나 WebSocket이 끊겼다가
+# 재연결될 때 스크립트를 처음부터 다시 실행한다. 그러면 메인 스크립트에서
+# 동기적으로 돌던 스크리닝이 통째로 죽고 페이지가 초기화된다. 이를 막으려고
+# 스크리닝 자체를 별도 스레드에서 돌리고, 메인 스크립트는 그 진행 상태만
+# 폴링해서 표시한다. 모듈 레벨 dict는 스크립트 rerun과 무관하게 살아남는다.
+_SCREEN_RUNNERS: dict[str, dict] = {}
+_SCREEN_RUNNERS_LOCK = threading.Lock()
+
+
+def _get_session_id() -> str:
+    try:
+        from streamlit.runtime.scriptrunner import get_script_run_ctx
+        ctx = get_script_run_ctx()
+        return ctx.session_id if ctx else "default"
+    except Exception:
+        return "default"
+
+
+def _get_screen_runner() -> dict | None:
+    with _SCREEN_RUNNERS_LOCK:
+        return _SCREEN_RUNNERS.get(_get_session_id())
+
+
+def _clear_screen_runner() -> None:
+    with _SCREEN_RUNNERS_LOCK:
+        _SCREEN_RUNNERS.pop(_get_session_id(), None)
+
+
+def _screen_worker(runner: dict, stock_dict_local: dict[str, str]) -> None:
+    universe = runner["universe"]
+    min_score = runner["min_score"]
+
+    runner["stage"] = "fetch_universe"
+    runner["stage_label"] = "유니버스 종목 목록 로딩"
+    try:
+        codes = get_universe_codes(universe)
+    except Exception as e:
+        runner["universe_error"] = str(e)
+        runner["status"] = "error"
+        runner["error_msg"] = f"KRX 종목 목록을 가져오지 못했습니다: {e}"
+        return
+
+    if not codes:
+        runner["status"] = "error"
+        runner["error_msg"] = "유니버스 종목 목록을 가져오지 못했습니다."
+        return
+
+    runner["universe_size"] = len(codes)
+    runner["total"] = len(codes)
+    runner["stage"] = "stage1"
+    runner["stage_label"] = "1단계 스크리닝"
+
+    screened: list[dict] = []
+    completed = 0
+    errors = 0
+    hist_module.begin_batch()
+    try:
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            futures = {executor.submit(cached_analyze, c, False, 0): c for c in codes}
+            for future in as_completed(futures):
+                if runner.get("_cancel"):
+                    break
+                c = futures[future]
+                try:
+                    r = future.result()
+                    if not r.get("error"):
+                        screened.append(r)
+                    else:
+                        errors += 1
+                except Exception:
+                    errors += 1
+                completed += 1
+                runner["completed"] = completed
+                runner["errors"] = errors
+                runner["current"] = stock_dict_local.get(c, c)
+    finally:
+        try:
+            hist_module.commit_batch()
+        except Exception:
+            pass
+
+    if runner.get("_cancel"):
+        runner["status"] = "cancelled"
+        return
+
+    dropped_details: list[dict] = []
+    excluded_stale = 0
+    fresh_results = []
+    for r in screened:
+        src = r.get("sources") or {}
+        is_stale = (src.get("fin_freshness") or {}).get("is_stale", False)
+        has_preliminary = bool(r.get("preliminary"))
+        if is_stale and not has_preliminary:
+            excluded_stale += 1
+            dropped_details.append({
+                "code": r.get("code"),
+                "name": r.get("name", r.get("code")),
+                "total": r.get("total"),
+                "close": r.get("last_close"),
+                "reason": _build_drop_reason(r, min_score, kind="stale"),
+            })
+            continue
+        fresh_results.append(r)
+
+    fresh_results.sort(key=lambda r: r.get("total", -999), reverse=True)
+    results = [r for r in fresh_results if r.get("total", -999) >= min_score]
+    score_dropped = [r for r in fresh_results if r.get("total", -999) < min_score]
+    excluded_score = len(score_dropped)
+    for r in score_dropped:
+        dropped_details.append({
+            "code": r.get("code"),
+            "name": r.get("name", r.get("code")),
+            "total": r.get("total"),
+            "close": r.get("last_close"),
+            "reason": _build_drop_reason(r, min_score, kind="score"),
+        })
+
+    runner["fresh_count"] = len(fresh_results)
+    runner["fresh_top_score"] = max(
+        (r.get("total", -999) for r in fresh_results), default=None,
+    )
+    runner["excluded_stale"] = excluded_stale
+    runner["excluded_score"] = excluded_score
+    runner["pre_deep_count"] = len(results)
+
+    if results:
+        from analyzer import enrich_with_deep_analysis, recompute_score_after_deep
+        runner["stage"] = "stage2"
+        runner["stage_label"] = "2단계 정밀 분석"
+        runner["total"] = len(results)
+        runner["completed"] = 0
+        runner["current"] = "준비 중"
+
+        def _enrich(r: dict) -> None:
+            enrich_with_deep_analysis(r, top_n=3)
+            recompute_score_after_deep(r)
+
+        with ThreadPoolExecutor(max_workers=3) as deep_exec:
+            deep_futures = {deep_exec.submit(_enrich, r): r for r in results}
+            deep_done = 0
+            for future in as_completed(deep_futures):
+                if runner.get("_cancel"):
+                    break
+                try:
+                    future.result()
+                except Exception:
+                    pass
+                deep_done += 1
+                rr = deep_futures[future]
+                runner["completed"] = deep_done
+                runner["current"] = rr.get("name", rr.get("code", ""))
+
+        if runner.get("_cancel"):
+            runner["status"] = "cancelled"
+            return
+
+        pre_filter_results = list(results)
+        deep_dropped = [r for r in pre_filter_results if r.get("total", -999) < min_score]
+        for r in deep_dropped:
+            dropped_details.append({
+                "code": r.get("code"),
+                "name": r.get("name", r.get("code")),
+                "total": r.get("total"),
+                "close": r.get("last_close"),
+                "reason": _build_drop_reason(r, min_score, kind="deep"),
+            })
+        results = [r for r in pre_filter_results if r.get("total", -999) >= min_score]
+        results.sort(key=lambda r: r.get("total", -999), reverse=True)
+        runner["dropped_after_deep"] = len(deep_dropped)
+
+    for r in results:
+        r["_screen_reason"] = _build_pass_reason(r, min_score)
+
+    runner["stage"] = "save"
+    runner["stage_label"] = "결과 저장 중"
+    try:
+        if hasattr(screening_history, "record_today_details"):
+            screening_history.record_today_details(
+                results, dropped_details,
+                min_score=min_score, universe=universe,
+            )
+        else:
+            screening_history.record_today([r["code"] for r in results])
+    except Exception:
+        pass
+
+    try:
+        for r in results:
+            scouted.add_from_analysis(r, universe=universe)
+    except Exception:
+        pass
+
+    runner["results"] = results
+    runner["dropped_details"] = dropped_details
+    runner["status"] = "done"
+
+
+def _start_screen_runner(
+    universe: str, min_score: int, stock_dict_local: dict[str, str],
+) -> dict:
+    runner: dict = {
+        "status": "running",
+        "stage": "init",
+        "stage_label": "준비 중",
+        "completed": 0,
+        "total": 0,
+        "universe_size": 0,
+        "current": "",
+        "errors": 0,
+        "universe": universe,
+        "min_score": min_score,
+        "results": None,
+        "dropped_details": None,
+        "excluded_stale": 0,
+        "excluded_score": 0,
+        "dropped_after_deep": 0,
+        "fresh_top_score": None,
+        "fresh_count": 0,
+        "pre_deep_count": 0,
+        "universe_error": None,
+        "error_msg": None,
+        "started_at": time.time(),
+        "finished_at": None,
+        "_cancel": False,
+    }
+    sid = _get_session_id()
+    with _SCREEN_RUNNERS_LOCK:
+        _SCREEN_RUNNERS[sid] = runner
+
+    def _work():
+        try:
+            _screen_worker(runner, stock_dict_local)
+        except Exception as e:
+            runner["status"] = "error"
+            runner["error_msg"] = f"{type(e).__name__}: {e}"
+        finally:
+            runner["finished_at"] = time.time()
+            if runner["status"] == "running":
+                runner["status"] = "done"
+
+    t = threading.Thread(target=_work, daemon=True, name=f"screen-{sid[:8]}")
+    try:
+        from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ctx
+        add_script_run_ctx(t, get_script_run_ctx())
+    except Exception:
+        pass
+    t.start()
+    return runner
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 백그라운드 일반 분석 러너 — 관심종목/즐겨찾기/단독/선택 종목 분석용
+# ─────────────────────────────────────────────────────────────────────────────
+# 동일한 이유로(스크립트 rerun에 죽지 않도록) 분석도 별도 스레드에서 돌린다.
+# 화면 전환/탭 백그라운드/새로고침 모두 분석을 죽이지 않음.
+_ANALYZE_RUNNERS: dict[str, dict] = {}
+_ANALYZE_RUNNERS_LOCK = threading.Lock()
+
+
+def _get_analyze_runner() -> dict | None:
+    with _ANALYZE_RUNNERS_LOCK:
+        return _ANALYZE_RUNNERS.get(_get_session_id())
+
+
+def _clear_analyze_runner() -> None:
+    with _ANALYZE_RUNNERS_LOCK:
+        _ANALYZE_RUNNERS.pop(_get_session_id(), None)
+
+
+def _analyze_worker(runner: dict, stock_dict_local: dict[str, str]) -> None:
+    codes = runner["codes"]
+    lite = runner.get("lite", False)
+    deep_top = runner.get("deep_top", 3)
+    label = runner.get("label", "분석")
+    total = len(codes)
+
+    runner["total"] = total
+    runner["stage"] = "analyzing"
+    runner["stage_label"] = label
+
+    if runner.get("clear_cache"):
+        try:
+            cached_analyze.clear()
+        except Exception:
+            pass
+
+    analyzed: list[dict] = []
+    errors = 0
+    hist_module.begin_batch()
+    try:
+        # 병렬화 — 종목 수가 적어도 IO bound라 3병렬이면 충분히 빠름
+        with ThreadPoolExecutor(max_workers=3) as ex:
+            futs = {ex.submit(cached_analyze, c, lite, deep_top): c for c in codes}
+            done = 0
+            for f in as_completed(futs):
+                if runner.get("_cancel"):
+                    break
+                c = futs[f]
+                try:
+                    r = f.result()
+                    if not r.get("error"):
+                        analyzed.append(r)
+                    else:
+                        errors += 1
+                except Exception:
+                    errors += 1
+                done += 1
+                runner["completed"] = done
+                runner["errors"] = errors
+                runner["current"] = stock_dict_local.get(c, c)
+    finally:
+        try:
+            hist_module.commit_batch()
+        except Exception:
+            pass
+
+    if runner.get("_cancel"):
+        runner["status"] = "cancelled"
+        runner["results"] = analyzed  # 부분 결과 보존
+        return
+
+    # 입력 순서를 유지하려면 코드 순으로 정렬
+    code_order = {c: i for i, c in enumerate(codes)}
+    analyzed.sort(key=lambda r: code_order.get(r.get("code"), 999_999))
+
+    runner["results"] = analyzed
+    runner["status"] = "done"
+
+
+def _start_analyze_runner(
+    kind: str,
+    codes: list[str],
+    label: str,
+    *,
+    lite: bool = False,
+    deep_top: int = 3,
+    clear_cache: bool = False,
+    subheader: str | None = None,
+    info_msg: str | None = None,
+    stock_dict_local: dict[str, str] | None = None,
+) -> dict:
+    clean_codes = [str(c).zfill(6) for c in codes if str(c).strip()]
+    runner: dict = {
+        "kind": kind,
+        "status": "running",
+        "stage": "init",
+        "stage_label": label,
+        "label": label,
+        "codes": clean_codes,
+        "total": len(clean_codes),
+        "completed": 0,
+        "current": "",
+        "errors": 0,
+        "lite": lite,
+        "deep_top": deep_top,
+        "clear_cache": clear_cache,
+        "subheader": subheader,
+        "info_msg": info_msg,
+        "results": None,
+        "error_msg": None,
+        "started_at": time.time(),
+        "finished_at": None,
+        "_cancel": False,
+    }
+    sid = _get_session_id()
+    with _ANALYZE_RUNNERS_LOCK:
+        _ANALYZE_RUNNERS[sid] = runner
+
+    sd = stock_dict_local if stock_dict_local is not None else {}
+
+    def _work():
+        try:
+            _analyze_worker(runner, sd)
+        except Exception as e:
+            runner["status"] = "error"
+            runner["error_msg"] = f"{type(e).__name__}: {e}"
+        finally:
+            runner["finished_at"] = time.time()
+            if runner["status"] == "running":
+                runner["status"] = "done"
+
+    t = threading.Thread(target=_work, daemon=True, name=f"analyze-{sid[:8]}")
+    try:
+        from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ctx
+        add_script_run_ctx(t, get_script_run_ctx())
+    except Exception:
+        pass
+    t.start()
+    return runner
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 백그라운드 추적 종목 재분석 러너 — '최근 스크리닝 후보' 뷰의 '모두 다시 분석'
+# ─────────────────────────────────────────────────────────────────────────────
+_REFRESH_RUNNERS: dict[str, dict] = {}
+_REFRESH_RUNNERS_LOCK = threading.Lock()
+
+
+def _get_refresh_runner() -> dict | None:
+    with _REFRESH_RUNNERS_LOCK:
+        return _REFRESH_RUNNERS.get(_get_session_id())
+
+
+def _clear_refresh_runner() -> None:
+    with _REFRESH_RUNNERS_LOCK:
+        _REFRESH_RUNNERS.pop(_get_session_id(), None)
+
+
+def _refresh_worker(runner: dict, stock_dict_local: dict[str, str]) -> None:
+    codes = runner["codes"]
+    n_codes = len(codes)
+    runner["total"] = n_codes
+    runner["stage"] = "stage1"
+    runner["stage_label"] = "1단계 재분석"
+
+    try:
+        cached_analyze.clear()
+    except Exception:
+        pass
+
+    from analyzer import enrich_with_deep_analysis, recompute_score_after_deep
+
+    refreshed: list[dict] = []
+    errs = 0
+    hist_module.begin_batch()
+    try:
+        with ThreadPoolExecutor(max_workers=3) as ex:
+            futs = {ex.submit(cached_analyze, c, False, 0): c for c in codes}
+            done = 0
+            for f in as_completed(futs):
+                if runner.get("_cancel"):
+                    break
+                c = futs[f]
+                try:
+                    r = f.result()
+                    if not r.get("error"):
+                        refreshed.append(r)
+                    else:
+                        errs += 1
+                except Exception:
+                    errs += 1
+                done += 1
+                runner["completed"] = done
+                runner["errors"] = errs
+                runner["current"] = stock_dict_local.get(c, c)
+
+        if runner.get("_cancel"):
+            runner["status"] = "cancelled"
+            return
+
+        if refreshed:
+            runner["stage"] = "stage2"
+            runner["stage_label"] = "2단계 정밀 분석"
+            runner["total"] = len(refreshed)
+            runner["completed"] = 0
+            runner["current"] = "준비 중"
+
+            def _enrich(r):
+                enrich_with_deep_analysis(r, top_n=3)
+                recompute_score_after_deep(r)
+
+            with ThreadPoolExecutor(max_workers=3) as dex:
+                dfuts = {dex.submit(_enrich, r): r for r in refreshed}
+                d_done = 0
+                for f in as_completed(dfuts):
+                    if runner.get("_cancel"):
+                        break
+                    try:
+                        f.result()
+                    except Exception:
+                        pass
+                    d_done += 1
+                    rr = dfuts[f]
+                    runner["completed"] = d_done
+                    runner["current"] = rr.get("name", rr.get("code", ""))
+
+            if runner.get("_cancel"):
+                runner["status"] = "cancelled"
+                return
+    finally:
+        try:
+            hist_module.commit_batch()
+        except Exception:
+            pass
+
+    runner["refreshed_count"] = len(refreshed)
+    runner["errors"] = errs
+    runner["status"] = "done"
+
+
+def _start_refresh_runner(
+    codes: list[str], stock_dict_local: dict[str, str],
+) -> dict:
+    clean_codes = [str(c).zfill(6) for c in codes if str(c).strip()]
+    runner: dict = {
+        "status": "running",
+        "stage": "init",
+        "stage_label": "준비 중",
+        "codes": clean_codes,
+        "total": len(clean_codes),
+        "completed": 0,
+        "current": "",
+        "errors": 0,
+        "refreshed_count": 0,
+        "error_msg": None,
+        "started_at": time.time(),
+        "finished_at": None,
+        "_cancel": False,
+    }
+    sid = _get_session_id()
+    with _REFRESH_RUNNERS_LOCK:
+        _REFRESH_RUNNERS[sid] = runner
+
+    def _work():
+        try:
+            _refresh_worker(runner, stock_dict_local)
+        except Exception as e:
+            runner["status"] = "error"
+            runner["error_msg"] = f"{type(e).__name__}: {e}"
+        finally:
+            runner["finished_at"] = time.time()
+            if runner["status"] == "running":
+                runner["status"] = "done"
+
+    t = threading.Thread(target=_work, daemon=True, name=f"refresh-{sid[:8]}")
+    try:
+        from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ctx
+        add_script_run_ctx(t, get_script_run_ctx())
+    except Exception:
+        pass
+    t.start()
+    return runner
+
+
 # 메인 영역
 
 # 1) 스크리닝 후보 전용 뷰 모드 (사이드바 '📌 최근 스크리닝 후보' 버튼 클릭 시)
@@ -1518,103 +2021,68 @@ if st.session_state.get("_view_mode") == "screening_history":
                 st.session_state["_run_refresh_picks"] = True
                 st.rerun()
 
-    # 추적 종목 다시 분석 (사용자가 위 버튼 누른 경우)
-    if st.session_state.pop("_run_refresh_picks", False) and recent_picks:
-        codes_to_refresh = list(recent_picks.keys())
-        n_codes = len(codes_to_refresh)
-
-        # 캐시 초기화 — 진짜 fresh 데이터 받게
-        cached_analyze.clear()
-
-        from analyzer import (
-            enrich_with_deep_analysis,
-            recompute_score_after_deep,
+    # 추적 종목 다시 분석 — 백그라운드 러너로 위임 (탭 백그라운드/새로고침에도 살아남음)
+    _refresh_runner = _get_refresh_runner()
+    _refresh_can_start = (
+        _refresh_runner is None
+        or _refresh_runner.get("status") in ("done", "error", "cancelled")
+    )
+    if st.session_state.pop("_run_refresh_picks", False) and recent_picks and _refresh_can_start:
+        if _refresh_runner is not None:
+            _clear_refresh_runner()
+        _refresh_runner = _start_refresh_runner(
+            list(recent_picks.keys()), stock_dict,
         )
 
-        st.caption(f"1단계: {n_codes}개 종목 재분석")
-        art1 = st.empty()
-        p1 = st.progress(0)
-        s1 = st.empty()
-        _progress_update(p1, s1, 0, n_codes, "1단계 재분석", "준비 중", art1, "refresh-stage1")
-        refreshed: list[dict] = []
-        errs = 0
+    if _refresh_runner is not None and _refresh_runner.get("status") == "running":
+        st.info(
+            "💡 백그라운드에서 진행됩니다. **다른 화면에 갔다 와도, 새로고침해도 "
+            "재분석은 계속 돕니다.** 이 페이지로 돌아오면 진행 상황을 다시 볼 수 있어요."
+        )
+        _rr_stage = _refresh_runner.get("stage")
+        _rr_label = _refresh_runner.get("stage_label", "진행 중")
+        _rr_completed = _refresh_runner.get("completed", 0)
+        _rr_total = _refresh_runner.get("total", 0) or 0
+        _rr_current = _refresh_runner.get("current", "") or ""
 
-        # 히스토리 배치 — 한 번에 저장
-        hist_module.begin_batch()
-        try:
-            with ThreadPoolExecutor(max_workers=3) as ex:
-                futs = {ex.submit(cached_analyze, c, False, 0): c for c in codes_to_refresh}
-                done = 0
-                for f in as_completed(futs):
-                    c = futs[f]
-                    try:
-                        r = f.result()
-                        if not r.get("error"):
-                            refreshed.append(r)
-                        else:
-                            errs += 1
-                    except Exception:
-                        errs += 1
-                    done += 1
-                    _progress_update(
-                        p1,
-                        s1,
-                        done,
-                        n_codes,
-                        "1단계 재분석",
-                        f"완료: {stock_dict.get(c, c)} ({c})",
-                        art1,
-                        "refresh-stage1",
-                    )
+        if _rr_stage == "stage1":
+            st.caption(f"1단계: {_rr_total}개 종목 재분석")
+        elif _rr_stage == "stage2":
+            st.caption(f"2단계: {_rr_total}개 종목 정밀 분석")
 
-            # 2단계: 깊이 분석 + 점수 재계산
-            if refreshed:
-                s1.caption(f"2단계: {len(refreshed)}개 정밀 분석 중")
-                art2 = st.empty()
-                p2 = st.progress(0)
-                s2 = st.empty()
-                _progress_update(p2, s2, 0, len(refreshed), "2단계 정밀 분석", "준비 중", art2, "refresh-stage2")
+        _rr_art = st.empty()
+        _rr_pb = st.progress(0)
+        _rr_sb = st.empty()
+        _progress_update(
+            _rr_pb, _rr_sb, _rr_completed, _rr_total,
+            _rr_label, f"완료: {_rr_current}",
+            _rr_art, f"refresh-{_rr_stage}",
+        )
 
-                def _enrich(r):
-                    enrich_with_deep_analysis(r, top_n=3)
-                    recompute_score_after_deep(r)
+        _rc_col, _ = st.columns([1, 5])
+        if _rc_col.button("취소", key="cancel_refresh_btn"):
+            _refresh_runner["_cancel"] = True
 
-                with ThreadPoolExecutor(max_workers=3) as dex:
-                    dfuts = {dex.submit(_enrich, r): r for r in refreshed}
-                    d_done = 0
-                    for f in as_completed(dfuts):
-                        try:
-                            f.result()
-                        except Exception:
-                            pass
-                        d_done += 1
-                        rr = dfuts[f]
-                        _progress_update(
-                            p2,
-                            s2,
-                            d_done,
-                            len(refreshed),
-                            "2단계 정밀 분석",
-                            f"완료: {rr.get('name', rr.get('code', ''))} ({rr.get('code', '')})",
-                            art2,
-                            "refresh-stage2",
-                        )
-                p2.empty()
-                s2.empty()
-        finally:
-            try:
-                hist_module.commit_batch()
-            except Exception:
-                pass
-
-        p1.empty()
-        s1.empty()
+        time.sleep(2)
+        st.rerun()
+    elif _refresh_runner is not None and _refresh_runner.get("status") == "error":
+        st.error(_refresh_runner.get("error_msg") or "재분석 중 오류 발생")
+        if st.button("닫기", key="close_refresh_err"):
+            _clear_refresh_runner()
+            st.rerun()
+    elif _refresh_runner is not None and _refresh_runner.get("status") == "cancelled":
+        st.warning("🛑 재분석이 취소됐습니다.")
+        if st.button("닫기", key="close_refresh_cancel"):
+            _clear_refresh_runner()
+            st.rerun()
+    elif _refresh_runner is not None and _refresh_runner.get("status") == "done":
         st.success(
-            f"✅ {len(refreshed)}개 점수 업데이트 완료 "
-            f"(에러 {errs}건). 표가 새 점수로 갱신됐습니다."
+            f"✅ {_refresh_runner.get('refreshed_count', 0)}개 점수 업데이트 완료 "
+            f"(에러 {_refresh_runner.get('errors', 0)}건). 표가 새 점수로 갱신됐습니다."
         )
-        # 표 그리기 위해 recent_picks 다시 로드 (record_snapshot이 score_history 갱신했음)
+        # 표 그리기 위해 recent_picks 다시 로드 (worker가 score_history 갱신했음)
         recent_picks = screening_history.get_recent(days=90)
+        _clear_refresh_runner()
 
     if not recent_picks:
         st.info("아직 누적된 스크리닝 결과가 없습니다. 사이드바 '🔍 발굴 시작' 눌러주세요.")
@@ -1996,304 +2464,296 @@ screen_req = st.session_state.pop("_screen", None)
 auto_run = st.session_state.pop("_auto_run_analyze", False)
 
 results = None
-if screen_req:
-    universe = screen_req["universe"]
-    min_score = screen_req["min_score"]
-    use_lite = False  # 항상 풀 모드 (lite 모드 제거됨)
+_screen_runner = _get_screen_runner()
+
+# 새 발굴 요청 — 진행 중인 러너가 없을 때만 새로 시작 (이중 클릭 방지)
+if screen_req and (
+    _screen_runner is None
+    or _screen_runner.get("status") in ("done", "error", "cancelled")
+):
+    if _screen_runner is not None:
+        _clear_screen_runner()
+    _screen_runner = _start_screen_runner(
+        screen_req["universe"], screen_req["min_score"], stock_dict,
+    )
+
+if _screen_runner is not None and _screen_runner.get("status") == "running":
+    universe = _screen_runner["universe"]
     label = UNIVERSE_LABELS.get(universe, universe)
+    st.subheader(f"🔍 발굴 진행 중 — {label}")
+    st.info(
+        "💡 백그라운드에서 진행됩니다. **브라우저 탭이 잠시 끊기거나 새로고침해도 "
+        "스크리닝은 계속 돕니다.** 페이지로 돌아오면 진행 상황을 다시 볼 수 있어요."
+    )
 
-    universe_error = None
-    try:
-        codes = get_universe_codes(universe)
-    except Exception as e:
-        codes = []
-        universe_error = e
+    stage = _screen_runner.get("stage")
+    stage_label = _screen_runner.get("stage_label") or "진행 중"
+    completed = _screen_runner.get("completed", 0)
+    total = _screen_runner.get("total", 0) or 0
+    current = _screen_runner.get("current", "") or ""
+    errors = _screen_runner.get("errors", 0)
 
-    st.subheader(f"🔍 발굴 결과 — {label}")
-    if universe_error is not None:
-        st.error(
-            "KRX 종목 목록을 가져오지 못했습니다. FinanceDataReader/KRX 쪽 데이터 서버가 "
-            "잠시 불안정할 때 발생합니다. 관심 종목 분석은 계속 사용할 수 있으니, "
-            "종목 발굴은 몇 분 뒤 다시 눌러주세요."
-        )
-        with st.expander("오류 상세 보기"):
-            st.code(str(universe_error))
-    elif not codes:
-        st.error("유니버스 종목 목록을 가져오지 못했습니다.")
-    else:
+    art_box = st.empty()
+    progress_bar = st.progress(0)
+    status_box = st.empty()
+
+    if stage == "fetch_universe":
+        st.caption("유니버스 종목 목록 로딩 중...")
+        progress_bar.progress(0)
+        status_box.caption(stage_label)
+    elif stage == "stage1":
         st.caption("1단계: 전체 분석 (공시 분류 + 잠정실적 + 뉴스)")
-        art_screen1 = st.empty()
-        progress = st.progress(0)
-        status = st.empty()
-        _progress_update(progress, status, 0, len(codes), "1단계 스크리닝", "준비 중", art_screen1, "screening-stage1")
-        screened: list[dict] = []
-        errors = 0
-        max_workers = 3
-        completed = 0
+        _progress_update(
+            progress_bar, status_box, completed, total,
+            "1단계 스크리닝", f"완료: {current}",
+            art_box, "screening-stage1",
+        )
+    elif stage == "stage2":
+        st.caption(f"2단계: 통과 {total}개 종목 정밀 분석 중...")
+        _progress_update(
+            progress_bar, status_box, completed, total,
+            "2단계 정밀 분석", f"완료: {current}",
+            art_box, "screening-stage2",
+        )
+    elif stage == "save":
+        st.caption("결과 저장 중...")
+        progress_bar.progress(1.0)
+        status_box.caption(stage_label)
+    else:
+        status_box.caption(stage_label)
 
-        # 스크리닝 동안 점수 히스토리를 배치 모드로 — N개 분석마다 N번 Gist 저장하는
-        # 대신 끝에 1번만 저장. 동시 호출로 인한 멈춤·리셋 방지.
-        hist_module.begin_batch()
-        try:
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                # 스크리닝은 깊이 분석 스킵 (deep_top=0) — 종목당 10초 이상 절감
-                futures = {
-                    executor.submit(cached_analyze, c, use_lite, 0): c
-                    for c in codes
-                }
-                for future in as_completed(futures):
-                    c = futures[future]
-                    try:
-                        r = future.result()
-                        if not r.get("error"):
-                            screened.append(r)
-                        else:
-                            errors += 1
-                    except Exception:
-                        errors += 1
-                    completed += 1
-                    nm = stock_dict.get(c, c)
-                    _progress_update(
-                        progress,
-                        status,
-                        completed,
-                        len(codes),
-                        "1단계 스크리닝",
-                        f"완료: {nm} ({c})",
-                        art_screen1,
-                        "screening-stage1",
-                    )
-        finally:
-            # 정상 종료든 예외든 항상 누적된 히스토리를 한 번에 저장
-            try:
-                hist_module.commit_batch()
-            except Exception:
-                pass
+    if errors:
+        st.caption(f"⚠️ 1단계 에러 {errors}건 (계속 진행)")
 
-        progress.empty()
-        status.empty()
+    cancel_col, _spacer = st.columns([1, 5])
+    if cancel_col.button("취소", key="cancel_screen_btn"):
+        _screen_runner["_cancel"] = True
+        st.caption("취소 요청 — 현재 진행 중인 종목까지만 처리하고 종료합니다.")
 
-        # 1) 재무 데이터 신선도 필터 — stale + 잠정실적 없음 = 제외
-        dropped_details: list[dict] = []
-        excluded_stale = 0
-        fresh_results = []
-        for r in screened:
-            src = r.get("sources") or {}
-            is_stale = (src.get("fin_freshness") or {}).get("is_stale", False)
-            has_preliminary = bool(r.get("preliminary"))
-            if is_stale and not has_preliminary:
-                excluded_stale += 1
-                dropped_details.append({
-                    "code": r.get("code"),
-                    "name": r.get("name", r.get("code")),
-                    "total": r.get("total"),
-                    "close": r.get("last_close"),
-                    "reason": _build_drop_reason(r, min_score, kind="stale"),
-                })
-                continue
-            fresh_results.append(r)
+    # 폴링 — 2초 후 다시 그려서 진행 상태 갱신
+    time.sleep(2)
+    st.rerun()
 
-        # 2) 종합점수 내림차순 + 최소 점수 필터
-        fresh_results.sort(key=lambda r: r.get("total", -999), reverse=True)
-        results = [r for r in fresh_results if r.get("total", -999) >= min_score]
-        score_dropped = [r for r in fresh_results if r.get("total", -999) < min_score]
-        excluded_score = len(score_dropped)
-        for r in score_dropped:
-            dropped_details.append({
-                "code": r.get("code"),
-                "name": r.get("name", r.get("code")),
-                "total": r.get("total"),
-                "close": r.get("last_close"),
-                "reason": _build_drop_reason(r, min_score, kind="score"),
-            })
+elif _screen_runner is not None and _screen_runner.get("status") in ("done", "error", "cancelled"):
+    universe = _screen_runner["universe"]
+    min_score = _screen_runner["min_score"]
+    label = UNIVERSE_LABELS.get(universe, universe)
+    st.subheader(f"🔍 발굴 결과 — {label}")
 
-        # 2단계: 통과 종목들에 깊이 분석 추가 + 점수 재계산
-        pre_deep_count = len(results)
-        if results:
-            from analyzer import enrich_with_deep_analysis, recompute_score_after_deep
-            st.caption(f"2단계: 통과 {len(results)}개 종목 정밀 분석 중...")
-            art_screen2 = st.empty()
-            deep_progress = st.progress(0)
-            deep_status = st.empty()
-            _progress_update(deep_progress, deep_status, 0, len(results), "2단계 정밀 분석", "준비 중", art_screen2, "screening-stage2")
+    if _screen_runner["status"] == "error":
+        st.error(_screen_runner.get("error_msg") or "알 수 없는 오류가 발생했습니다.")
+        ue = _screen_runner.get("universe_error")
+        if ue:
+            with st.expander("오류 상세 보기"):
+                st.code(str(ue))
+        if st.button("닫기 / 다시 시도", key="close_screen_err"):
+            _clear_screen_runner()
+            st.rerun()
+        st.stop()
 
-            def _enrich_and_recompute(r: dict) -> None:
-                enrich_with_deep_analysis(r, top_n=3)
-                recompute_score_after_deep(r)
+    if _screen_runner["status"] == "cancelled":
+        st.warning("🛑 사용자 취소 — 중간 결과는 저장되지 않았습니다.")
+        if st.button("닫기", key="close_screen_cancel"):
+            _clear_screen_runner()
+            st.rerun()
+        st.stop()
 
-            with ThreadPoolExecutor(max_workers=3) as deep_exec:
-                deep_futures = {
-                    deep_exec.submit(_enrich_and_recompute, r): r for r in results
-                }
-                deep_done = 0
-                for future in as_completed(deep_futures):
-                    try:
-                        future.result()
-                    except Exception:
-                        pass
-                    deep_done += 1
-                    rr = deep_futures[future]
-                    _progress_update(
-                        deep_progress,
-                        deep_status,
-                        deep_done,
-                        len(results),
-                        "2단계 정밀 분석",
-                        f"완료: {rr.get('name', rr.get('code', ''))} ({rr.get('code', '')})",
-                        art_screen2,
-                        "screening-stage2",
-                    )
-            deep_progress.empty()
-            deep_status.empty()
+    # status == "done"
+    results = _screen_runner.get("results") or []
+    universe_size = _screen_runner.get("universe_size", 0)
+    errors = _screen_runner.get("errors", 0)
+    excluded_stale = _screen_runner.get("excluded_stale", 0)
+    excluded_score = _screen_runner.get("excluded_score", 0)
+    dropped_after_deep = _screen_runner.get("dropped_after_deep", 0)
+    top_score = _screen_runner.get("fresh_top_score")
 
-            # 깊이 분석 결과로 점수가 떨어진 종목 제거 (재필터)
-            pre_filter_results = list(results)
-            deep_dropped = [r for r in pre_filter_results if r.get("total", -999) < min_score]
-            for r in deep_dropped:
-                dropped_details.append({
-                    "code": r.get("code"),
-                    "name": r.get("name", r.get("code")),
-                    "total": r.get("total"),
-                    "close": r.get("last_close"),
-                    "reason": _build_drop_reason(r, min_score, kind="deep"),
-                })
-            results = [r for r in pre_filter_results if r.get("total", -999) >= min_score]
-            results.sort(key=lambda r: r.get("total", -999), reverse=True)
-            dropped_after_deep = len(deep_dropped)
-        else:
-            dropped_after_deep = 0
+    if results:
+        msg = (
+            f"✅ {universe_size}개 1차 분석 · **{len(results)}개 최종 통과** "
+            f"(점수 ≥ {min_score:+d}, 에러 {errors}건"
+        )
+        if excluded_stale > 0:
+            msg += f", stale 제외 {excluded_stale}"
+        if dropped_after_deep > 0:
+            msg += f", 정밀 분석 후 탈락 {dropped_after_deep}"
+        msg += ")."
+        st.success(msg)
+        st.info(
+            f"📌 최종 통과 {len(results)}개가 사이드바 **'최근 스크리닝 후보'** 에 "
+            "자동 추가됐습니다. 매일 돌리면 점수 변화·주가 추이·이탈이 추적돼요."
+        )
+    else:
+        st.warning(
+            f"🚫 **조건을 통과한 종목이 없습니다** "
+            f"({universe_size}개 분석)"
+        )
+        with st.container(border=True):
+            st.markdown("#### 📊 발굴 내역")
+            lines = [
+                f"- 분석 시도: **{universe_size}개**",
+                f"- 에러: {errors}개",
+            ]
+            if excluded_stale > 0:
+                lines.append(
+                    f"- 재무 stale + 잠정실적 없음 자동 제외: **{excluded_stale}개**"
+                )
+            lines.append(
+                f"- 점수 {min_score:+d}점 미만으로 탈락: **{excluded_score}개**"
+            )
+            if dropped_after_deep > 0:
+                lines.append(
+                    f"- 정밀 분석 후 점수 미달로 추가 탈락: **{dropped_after_deep}개**"
+                )
+            if top_score is not None:
+                lines.append(f"- 통과 후보 중 최고 점수: **{top_score:+d}점**")
+            st.markdown("\n".join(lines))
 
-        for r in results:
-            r["_screen_reason"] = _build_pass_reason(r, min_score)
+            st.markdown("#### 💡 다음 시도")
+            st.markdown(
+                f"- 사이드바에서 **최소 종합점수를 낮춰**보세요 "
+                f"(현재 `{min_score:+d}`, 추천 `{max(top_score, 0) if top_score is not None else 0:+d}` 정도부터)\n"
+                "- 더 넓은 유니버스(KOSPI TOP 50 등) 선택\n"
+                "- 5/15 이후 1Q 보고서가 등록되면 stale 제외 종목들도 후보에 다시 들어옵니다"
+            )
+    st.session_state.results = results
+    # 다음 트리거(분석/즐겨찾기/단독 등)가 이 분기에 막히지 않도록 러너 비움
+    # — 결과는 session_state에 이미 저장됐고, 표 렌더는 마지막 `if results:`에서 처리
+    _clear_screen_runner()
 
-        # 스크리닝 히스토리 자동 저장 — 최종 통과/탈락 이유까지 저장
-        try:
-            if hasattr(screening_history, "record_today_details"):
-                screening_history.record_today_details(
-                    results,
-                    dropped_details,
-                    min_score=min_score,
-                    universe=universe,
+else:
+    # ─── 일반 분석(관심종목/즐겨찾기/단독/선택) 트리거 → 백그라운드 러너 ───
+    _analyze_runner = _get_analyze_runner()
+
+    # 1) 새 트리거 처리 — 진행 중인 러너가 없을 때만 새로 시작
+    _can_start_new = (
+        _analyze_runner is None
+        or _analyze_runner.get("status") in ("done", "error", "cancelled")
+    )
+
+    _new_trigger: tuple | None = None
+    if _can_start_new:
+        if selected_screen_codes:
+            _ssc = [str(c).zfill(6) for c in selected_screen_codes if str(c).strip()]
+            if _ssc:
+                _new_trigger = (
+                    "selected", _ssc, "선택 종목 분석",
+                    False, 3, True,
+                    "🔍 선택 종목 분석 결과",
+                    f"📌 최근 스크리닝 후보에서 체크한 **{len(_ssc)}개** 종목만 분석했습니다. "
+                    "다른 종목을 고르려면 사이드바의 **최근 스크리닝 후보**로 다시 들어가세요.",
                 )
             else:
-                screening_history.record_today([r["code"] for r in results])
-        except Exception:
-            pass
-
-        # 발굴 추적 자동 등록 — 가상 매매 PnL 검증용 (verifier가 이걸로 수익률 계산)
-        # 이미 등록된 종목은 add_from_analysis가 False 반환하고 건너뜀 (최초 발굴 시점 보존)
-        try:
-            for r in results:
-                scouted.add_from_analysis(r, universe=universe)
-        except Exception:
-            pass
-
-        if results:
-            # 정상: 통과 종목 있음
-            msg = (
-                f"✅ {len(codes)}개 1차 분석 · **{len(results)}개 최종 통과** "
-                f"(점수 ≥ {min_score:+d}, 에러 {errors}건"
+                st.warning("선택된 종목이 없습니다.")
+        elif focus_code:
+            _name = stock_dict.get(focus_code, focus_code)
+            _new_trigger = (
+                "focus", [focus_code], f"{_name} 단독 분석",
+                False, 3, False,
+                None,
+                f"⭐ **{_name}** 단독 분석 결과입니다. 워치리스트 전체를 보려면 **🔍 분석하기**를 누르세요.",
             )
-            if excluded_stale > 0:
-                msg += f", stale 제외 {excluded_stale}"
-            if dropped_after_deep > 0:
-                msg += f", 정밀 분석 후 탈락 {dropped_after_deep}"
-            msg += ")."
-            st.success(msg)
-            st.info(
-                f"📌 최종 통과 {len(results)}개가 사이드바 **'최근 스크리닝 후보'** 에 "
-                "자동 추가됐습니다. 매일 돌리면 점수 변화·주가 추이·이탈이 추적돼요."
+        elif analyze_favs_only:
+            _favs = load_favorites()
+            if _favs:
+                _new_trigger = (
+                    "favs", _favs, "즐겨찾기 분석",
+                    False, 3, False,
+                    None,
+                    f"⭐ 즐겨찾기 **{len(_favs)}개**만 분석한 결과입니다. "
+                    "워치리스트는 그대로이며, 워치리스트 전체를 보려면 **🔍 분석하기**를 누르세요.",
+                )
+            else:
+                st.warning("⭐ 즐겨찾기가 비어있습니다. 종목 카드의 ☆ 버튼으로 추가하세요.")
+        elif (run_analysis or auto_run) and selected_codes:
+            _new_trigger = (
+                "watchlist", selected_codes, "관심종목 분석",
+                False, 3, False, None, None,
             )
 
+    if _new_trigger:
+        _k, _codes, _label, _lite, _dtop, _cc, _sub, _imsg = _new_trigger
+        if _analyze_runner is not None:
+            _clear_analyze_runner()
+        _analyze_runner = _start_analyze_runner(
+            kind=_k, codes=_codes, label=_label,
+            lite=_lite, deep_top=_dtop, clear_cache=_cc,
+            subheader=_sub, info_msg=_imsg,
+            stock_dict_local=stock_dict,
+        )
+    elif (
+        not _can_start_new
+        and (focus_code or selected_screen_codes or analyze_favs_only or run_analysis or auto_run)
+    ):
+        # 분석 진행 중인데 새 분석 트리거가 또 눌렸음 — 안내
+        st.caption("ℹ️ 이미 분석이 진행 중입니다. 완료 후 다시 시도하세요.")
+
+    # 2) 러너 상태별 화면 표시
+    if _analyze_runner is not None and _analyze_runner.get("status") == "running":
+        if _analyze_runner.get("subheader"):
+            st.subheader(_analyze_runner["subheader"])
+        st.info(
+            "💡 백그라운드에서 진행됩니다. **다른 화면에 갔다 와도, 새로고침해도 "
+            "분석은 계속 돕니다.** 페이지로 돌아오면 진행 상황을 다시 볼 수 있어요."
+        )
+        _ar_label = _analyze_runner.get("label", "분석")
+        _ar_completed = _analyze_runner.get("completed", 0)
+        _ar_total = _analyze_runner.get("total", 0) or 0
+        _ar_current = _analyze_runner.get("current", "") or ""
+        _ar_errors = _analyze_runner.get("errors", 0)
+
+        _ar_art = st.empty()
+        _ar_pb = st.progress(0)
+        _ar_sb = st.empty()
+        _progress_update(
+            _ar_pb, _ar_sb, _ar_completed, _ar_total,
+            _ar_label, f"완료: {_ar_current}",
+            _ar_art, f"{_ar_label}-analysis",
+        )
+        if _ar_errors:
+            st.caption(f"⚠️ 에러 {_ar_errors}건 (계속 진행)")
+
+        _cc_col, _ = st.columns([1, 5])
+        if _cc_col.button("취소", key="cancel_analyze_btn"):
+            _analyze_runner["_cancel"] = True
+            st.caption("취소 요청 — 현재까지 분석된 종목으로 마무리합니다.")
+
+        time.sleep(2)
+        st.rerun()
+
+    elif _analyze_runner is not None and _analyze_runner.get("status") == "error":
+        st.error(_analyze_runner.get("error_msg") or "분석 중 오류가 발생했습니다.")
+        if st.button("닫기 / 다시 시도", key="close_analyze_err"):
+            _clear_analyze_runner()
+            st.rerun()
+
+    elif _analyze_runner is not None and _analyze_runner.get("status") == "cancelled":
+        _partial = _analyze_runner.get("results") or []
+        if _partial:
+            st.warning(f"🛑 분석 취소 — 취소 전까지 완료된 **{len(_partial)}개** 결과만 표시합니다.")
+            results = _partial
+            st.session_state.results = results
         else:
-            # 빈 결과 — 명확히 안내 + 원인 설명 + 다음 액션 제안
-            top_score = max(
-                (r.get("total", -999) for r in fresh_results), default=None,
-            )
-            st.warning(
-                f"🚫 **조건을 통과한 종목이 없습니다** "
-                f"({len(codes)}개 분석)"
-            )
-            with st.container(border=True):
-                st.markdown("#### 📊 발굴 내역")
-                lines = [
-                    f"- 분석 시도: **{len(codes)}개**",
-                    f"- 에러: {errors}개",
-                ]
-                if excluded_stale > 0:
-                    lines.append(
-                        f"- 재무 stale + 잠정실적 없음 자동 제외: **{excluded_stale}개**"
-                    )
-                lines.append(
-                    f"- 점수 {min_score:+d}점 미만으로 탈락: **{excluded_score}개**"
-                )
-                if dropped_after_deep > 0:
-                    lines.append(
-                        f"- 정밀 분석 후 점수 미달로 추가 탈락: **{dropped_after_deep}개**"
-                    )
-                if top_score is not None:
-                    lines.append(f"- 통과 후보 중 최고 점수: **{top_score:+d}점**")
-                st.markdown("\n".join(lines))
+            st.warning("🛑 분석이 취소됐습니다.")
+        if st.button("닫기", key="close_analyze_cancel"):
+            _clear_analyze_runner()
+            st.rerun()
 
-                st.markdown("#### 💡 다음 시도")
-                st.markdown(
-                    f"- 사이드바에서 **최소 종합점수를 낮춰**보세요 "
-                    f"(현재 `{min_score:+d}`, 추천 `{max(top_score, 0) if top_score is not None else 0:+d}` 정도부터)\n"
-                    "- 더 넓은 유니버스(KOSPI TOP 50 등) 선택\n"
-                    "- 5/15 이후 1Q 보고서가 등록되면 stale 제외 종목들도 후보에 다시 들어옵니다"
-                )
+    elif _analyze_runner is not None and _analyze_runner.get("status") == "done":
+        if _analyze_runner.get("subheader"):
+            st.subheader(_analyze_runner["subheader"])
+        if _analyze_runner.get("info_msg"):
+            st.info(_analyze_runner["info_msg"])
+        results = _analyze_runner.get("results") or []
         st.session_state.results = results
+        # 다음 트리거가 막히지 않도록 결과 채택 후 러너 비움 — 결과는 session_state에 남음
+        _clear_analyze_runner()
 
-elif selected_screen_codes:
-    selected_screen_codes = [str(c).zfill(6) for c in selected_screen_codes if str(c).strip()]
-    if not selected_screen_codes:
-        st.warning("선택된 종목이 없습니다.")
+    elif not selected_codes:
+        st.info("👈 사이드바에서 분석할 종목을 선택하세요.")
+    elif "results" in st.session_state:
+        results = st.session_state.results
     else:
-        st.subheader("🔍 선택 종목 분석 결과")
-        results = run_analysis_with_progress(
-            selected_screen_codes,
-            label="선택 종목 분석",
-            clear_cache=True,
-        )
-        st.session_state.results = results
-        st.info(
-            f"📌 최근 스크리닝 후보에서 체크한 **{len(selected_screen_codes)}개** 종목만 분석했습니다. "
-            "다른 종목을 고르려면 사이드바의 **최근 스크리닝 후보**로 다시 들어가세요."
-        )
-elif focus_code:
-    name = stock_dict.get(focus_code, focus_code)
-    results = run_analysis_with_progress(
-        [focus_code],
-        label=f"{name} 단독 분석",
-    )
-    st.session_state.results = results
-    st.info(f"⭐ **{name}** 단독 분석 결과입니다. 워치리스트 전체를 보려면 **🔍 분석하기**를 누르세요.")
-elif analyze_favs_only:
-    favs = load_favorites()
-    if not favs:
-        st.warning("⭐ 즐겨찾기가 비어있습니다. 종목 카드의 ☆ 버튼으로 추가하세요.")
-    else:
-        results = run_analysis_with_progress(
-            favs,
-            label="즐겨찾기 분석",
-        )
-        st.session_state.results = results
-        st.info(
-            f"⭐ 즐겨찾기 **{len(favs)}개**만 분석한 결과입니다. "
-            "워치리스트는 그대로이며, 워치리스트 전체를 보려면 **🔍 분석하기**를 누르세요."
-        )
-elif not selected_codes:
-    st.info("👈 사이드바에서 분석할 종목을 선택하세요.")
-elif run_analysis or auto_run:
-    results = run_analysis_with_progress(
-        selected_codes,
-        label="관심종목 분석",
-    )
-    st.session_state.results = results
-elif "results" in st.session_state:
-    results = st.session_state.results
-else:
-    st.info(f"선택된 종목: {len(selected_codes)}개. **분석하기** 버튼을 눌러 시작하세요.")
+        st.info(f"선택된 종목: {len(selected_codes)}개. **분석하기** 버튼을 눌러 시작하세요.")
 
 if results:
     if len(results) > 1:
