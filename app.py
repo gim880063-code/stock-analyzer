@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+from streamlit_autorefresh import st_autorefresh
 
 from analyzer import (
     KOREAN_NAMES, UNIVERSE_LABELS, all_korean_stocks, analyze,
@@ -1472,12 +1473,10 @@ _SCREEN_RUNNERS_LOCK = threading.Lock()
 
 
 def _get_session_id() -> str:
-    try:
-        from streamlit.runtime.scriptrunner import get_script_run_ctx
-        ctx = get_script_run_ctx()
-        return ctx.session_id if ctx else "default"
-    except Exception:
-        return "default"
+    # Streamlit Cloud의 ctx.session_id가 rerun 사이 일관성이 떨어지는 경우가 있어서
+    # 개인 앱(단일 사용자)에서는 고정 키를 쓰는 게 안정적. 모듈 레벨 dict가 단일 키로
+    # 동기화돼 — 백그라운드 스레드/폴링 rerun에서 같은 러너를 항상 찾는다.
+    return "global"
 
 
 def _get_screen_runner() -> dict | None:
@@ -2063,8 +2062,8 @@ if st.session_state.get("_view_mode") == "screening_history":
         if _rc_col.button("취소", key="cancel_refresh_btn"):
             _refresh_runner["_cancel"] = True
 
-        time.sleep(2)
-        st.rerun()
+        # JS 기반 자동 새로고침 — Streamlit Cloud에서 time.sleep+st.rerun보다 안정적
+        st_autorefresh(interval=2000, key="refresh_runner_poll")
     elif _refresh_runner is not None and _refresh_runner.get("status") == "error":
         st.error(_refresh_runner.get("error_msg") or "재분석 중 오류 발생")
         if st.button("닫기", key="close_refresh_err"):
@@ -2530,9 +2529,8 @@ if _screen_runner is not None and _screen_runner.get("status") == "running":
         _screen_runner["_cancel"] = True
         st.caption("취소 요청 — 현재 진행 중인 종목까지만 처리하고 종료합니다.")
 
-    # 폴링 — 2초 후 다시 그려서 진행 상태 갱신
-    time.sleep(2)
-    st.rerun()
+    # JS 기반 자동 새로고침 — Streamlit Cloud에서 time.sleep+st.rerun보다 안정적
+    st_autorefresh(interval=2000, key="screen_runner_poll")
 
 elif _screen_runner is not None and _screen_runner.get("status") in ("done", "error", "cancelled"):
     universe = _screen_runner["universe"]
@@ -2717,8 +2715,8 @@ else:
             _analyze_runner["_cancel"] = True
             st.caption("취소 요청 — 현재까지 분석된 종목으로 마무리합니다.")
 
-        time.sleep(2)
-        st.rerun()
+        # JS 기반 자동 새로고침 — Streamlit Cloud에서 time.sleep+st.rerun보다 안정적
+        st_autorefresh(interval=2000, key="analyze_runner_poll")
 
     elif _analyze_runner is not None and _analyze_runner.get("status") == "error":
         st.error(_analyze_runner.get("error_msg") or "분석 중 오류가 발생했습니다.")
