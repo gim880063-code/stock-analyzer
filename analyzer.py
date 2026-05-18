@@ -813,6 +813,54 @@ def _resolve_name(code: str) -> str:
         return code
 
 
+# 발굴 시점 직전 급등 감지 — 평균 회귀 함정 회피용 하드 제외 필터.
+# 점수 시뮬레이션에서 단기 ≥3 그룹이 -4.91% 손실 (3/3 전부 손실)이라는 패턴이
+# 관찰돼 추가. 거래량·수급·시장상대강도 점수가 높으면 이미 상승한 종목일 가능성이
+# 크고, 발굴 시점이 고점이라 다음날부터 되돌림에 맞기 쉬움.
+SURGE_THRESHOLDS = {
+    "d1": 6.0,   # 1일 +6% 이상 = 직전 일봉 큰 양봉, 단기 고점 가능성
+    "d3": 13.0,  # 3일 누적 +13% 이상 = 단기 급등
+    "d5": 20.0,  # 5일 누적 +20% 이상 = 강한 단기 랠리
+    "d20": 40.0, # 20일 누적 +40% 이상 = 중기 과열
+}
+
+
+def _compute_recent_surge(df) -> dict:
+    """발굴 시점 직전 N일 누적 수익률을 계산하고 임계값 초과 여부 반환.
+
+    반환:
+      is_surge: bool — 임계값 하나라도 넘으면 True
+      metrics: {"d1": float, "d3": ..., "d5": ..., "d20": ...} — 계산 가능한 것만
+      triggers: list[str] — 사람이 읽을 수 있는 트리거 설명 (UI 표시용)
+    """
+    if df is None or len(df) < 2:
+        return {"is_surge": False, "metrics": {}, "triggers": []}
+
+    close = df["Close"]
+    last = float(close.iloc[-1])
+    metrics: dict[str, float] = {}
+
+    # 각 windows: 마지막 종가 대비 N일 전 종가 누적 수익률
+    for label, n_back in [("d1", 1), ("d3", 3), ("d5", 5), ("d20", 20)]:
+        if len(close) >= n_back + 1:
+            past = float(close.iloc[-(n_back + 1)])
+            if past > 0:
+                metrics[label] = round((last / past - 1) * 100, 2)
+
+    triggers: list[str] = []
+    for label, threshold in SURGE_THRESHOLDS.items():
+        val = metrics.get(label)
+        if val is not None and val >= threshold:
+            label_kr = {"d1": "1일", "d3": "3일", "d5": "5일", "d20": "20일"}[label]
+            triggers.append(f"{label_kr} +{val:.1f}%")
+
+    return {
+        "is_surge": bool(triggers),
+        "metrics": metrics,
+        "triggers": triggers,
+    }
+
+
 def analyze(code: str, lite: bool = False, deep_top: int = 3) -> AnalysisResult:
     """
     종목 분석.
@@ -1037,6 +1085,7 @@ def analyze(code: str, lite: bool = False, deep_top: int = 3) -> AnalysisResult:
         "disclosures": disclosures,
         "news": news_items,
         "preliminary": preliminary,
+        "recent_surge": _compute_recent_surge(df),
         "sources": sources,
     }
 

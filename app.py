@@ -976,6 +976,15 @@ def _build_drop_reason(r: dict, min_score: int | None = None, kind: str = "score
 
     if kind == "stale":
         base = "재무 데이터가 오래됐고 잠정실적공시도 없어 스크리닝에서 제외"
+    elif kind == "surge":
+        triggers = (r.get("recent_surge") or {}).get("triggers") or []
+        if triggers:
+            base = (
+                f"발굴 시점 직전 급등 감지({', '.join(triggers)}) — "
+                "고점 추격 회피용 자동 제외"
+            )
+        else:
+            base = "발굴 시점 직전 단기 급등 — 평균 회귀 위험으로 자동 제외"
     elif kind == "deep":
         if isinstance(total, int) and min_score is not None:
             base = f"정밀 분석 후 종합점수 {total:+d}점으로 기준 {min_score:+d}점 미만"
@@ -987,10 +996,12 @@ def _build_drop_reason(r: dict, min_score: int | None = None, kind: str = "score
         else:
             base = "종합점수 기준 미달"
 
-    if negative:
-        base += f". 부담 요인: {negative}"
-    elif positive:
-        base += f". 긍정 요인은 있으나 기준점 미달: {positive}"
+    # surge 사유는 점수 요인을 덧붙이지 않음 — 사유가 점수 외적이라 혼선 방지
+    if kind != "surge":
+        if negative:
+            base += f". 부담 요인: {negative}"
+        elif positive:
+            base += f". 긍정 요인은 있으나 기준점 미달: {positive}"
     return base
 
 
@@ -1549,6 +1560,7 @@ def _screen_worker(runner: dict, stock_dict_local: dict[str, str]) -> None:
 
     dropped_details: list[dict] = []
     excluded_stale = 0
+    excluded_surge = 0
     fresh_results = []
     for r in screened:
         src = r.get("sources") or {}
@@ -1562,6 +1574,19 @@ def _screen_worker(runner: dict, stock_dict_local: dict[str, str]) -> None:
                 "total": r.get("total"),
                 "close": r.get("last_close"),
                 "reason": _build_drop_reason(r, min_score, kind="stale"),
+            })
+            continue
+        # 최근 급등 자동 제외 — 발굴 시점이 단기 고점이라 평균 회귀 위험.
+        # 점수 시뮬레이션에서 단기 ≥3 그룹이 전부 손실 (-3~-8%) 보인 패턴 대응.
+        surge_info = r.get("recent_surge") or {}
+        if surge_info.get("is_surge"):
+            excluded_surge += 1
+            dropped_details.append({
+                "code": r.get("code"),
+                "name": r.get("name", r.get("code")),
+                "total": r.get("total"),
+                "close": r.get("last_close"),
+                "reason": _build_drop_reason(r, min_score, kind="surge"),
             })
             continue
         fresh_results.append(r)
@@ -1584,6 +1609,7 @@ def _screen_worker(runner: dict, stock_dict_local: dict[str, str]) -> None:
         (r.get("total", -999) for r in fresh_results), default=None,
     )
     runner["excluded_stale"] = excluded_stale
+    runner["excluded_surge"] = excluded_surge
     runner["excluded_score"] = excluded_score
     runner["pre_deep_count"] = len(results)
 
@@ -1676,6 +1702,7 @@ def _start_screen_runner(
         "results": None,
         "dropped_details": None,
         "excluded_stale": 0,
+        "excluded_surge": 0,
         "excluded_score": 0,
         "dropped_after_deep": 0,
         "fresh_top_score": None,
@@ -2556,6 +2583,7 @@ elif _screen_runner is not None and _screen_runner.get("status") in ("done", "er
     universe_size = _screen_runner.get("universe_size", 0)
     errors = _screen_runner.get("errors", 0)
     excluded_stale = _screen_runner.get("excluded_stale", 0)
+    excluded_surge = _screen_runner.get("excluded_surge", 0)
     excluded_score = _screen_runner.get("excluded_score", 0)
     dropped_after_deep = _screen_runner.get("dropped_after_deep", 0)
     top_score = _screen_runner.get("fresh_top_score")
@@ -2567,6 +2595,8 @@ elif _screen_runner is not None and _screen_runner.get("status") in ("done", "er
         )
         if excluded_stale > 0:
             msg += f", stale 제외 {excluded_stale}"
+        if excluded_surge > 0:
+            msg += f", 급등 제외 {excluded_surge}"
         if dropped_after_deep > 0:
             msg += f", 정밀 분석 후 탈락 {dropped_after_deep}"
         msg += ")."
@@ -2589,6 +2619,10 @@ elif _screen_runner is not None and _screen_runner.get("status") in ("done", "er
             if excluded_stale > 0:
                 lines.append(
                     f"- 재무 stale + 잠정실적 없음 자동 제외: **{excluded_stale}개**"
+                )
+            if excluded_surge > 0:
+                lines.append(
+                    f"- 발굴 시점 급등 자동 제외(고점 추격 회피): **{excluded_surge}개**"
                 )
             lines.append(
                 f"- 점수 {min_score:+d}점 미만으로 탈락: **{excluded_score}개**"
