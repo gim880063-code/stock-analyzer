@@ -1663,6 +1663,8 @@ def _screen_worker(runner: dict, stock_dict_local: dict[str, str]) -> None:
 
     runner["stage"] = "save"
     runner["stage_label"] = "결과 저장 중"
+    runner["save_ok"] = False
+    runner["save_error"] = None
     try:
         if hasattr(screening_history, "record_today_details"):
             screening_history.record_today_details(
@@ -1671,8 +1673,14 @@ def _screen_worker(runner: dict, stock_dict_local: dict[str, str]) -> None:
             )
         else:
             screening_history.record_today([r["code"] for r in results])
+        runner["save_ok"] = True
+    except Exception as e:
+        runner["save_error"] = f"{type(e).__name__}: {e}"
+    try:
+        import cloud_store as _cs
+        runner["sync_log"] = _cs.get_sync_log()[-10:]
     except Exception:
-        pass
+        runner["sync_log"] = []
 
     try:
         for r in results:
@@ -2605,6 +2613,17 @@ elif _screen_runner is not None and _screen_runner.get("status") in ("done", "er
             f"📌 최종 통과 {len(results)}개가 사이드바 **'최근 스크리닝 후보'** 에 "
             "자동 추가됐습니다. 매일 돌리면 점수 변화·주가 추이·이탈이 추적돼요."
         )
+        _save_ok = _screen_runner.get("save_ok")
+        _save_err = _screen_runner.get("save_error")
+        _sync_log = _screen_runner.get("sync_log") or []
+        if _save_err:
+            st.error(f"⚠️ 스크리닝 결과 저장 실패: {_save_err}")
+        elif _save_ok is False:
+            st.warning("⚠️ 저장 단계가 실행되지 않았습니다.")
+        if _sync_log:
+            with st.expander("🔍 Gist 동기화 로그 (진단용)"):
+                for line in _sync_log:
+                    st.code(line, language=None)
     else:
         st.warning(
             f"🚫 **조건을 통과한 종목이 없습니다** "
@@ -2642,6 +2661,17 @@ elif _screen_runner is not None and _screen_runner.get("status") in ("done", "er
                 "- 더 넓은 유니버스(KOSPI TOP 50 등) 선택\n"
                 "- 5/15 이후 1Q 보고서가 등록되면 stale 제외 종목들도 후보에 다시 들어옵니다"
             )
+        _save_ok = _screen_runner.get("save_ok")
+        _save_err = _screen_runner.get("save_error")
+        _sync_log = _screen_runner.get("sync_log") or []
+        if _save_err:
+            st.error(f"⚠️ 스크리닝 결과 저장 실패: {_save_err}")
+        elif _save_ok is False:
+            st.warning("⚠️ 저장 단계가 실행되지 않았습니다.")
+        if _sync_log:
+            with st.expander("🔍 Gist 동기화 로그 (진단용)"):
+                for line in _sync_log:
+                    st.code(line, language=None)
     st.session_state.results = results
     # 다음 트리거(분석/즐겨찾기/단독 등)가 이 분기에 막히지 않도록 러너 비움
     # — 결과는 session_state에 이미 저장됐고, 표 렌더는 마지막 `if results:`에서 처리
