@@ -158,8 +158,10 @@ with st.sidebar:
         if custom_code.strip() not in selected_codes:
             selected_codes.append(custom_code.strip())
 
-    # 변경될 때마다 자동 저장
-    save_watchlist(selected_codes)
+    # 실제로 변경됐을 때만 저장 — 매 rerun 호출되면 GitHub API rate limit 소진됨
+    # (st_autorefresh 폴링이 2초마다 rerun 유발하므로 무조건 호출하면 분당 30회 PATCH)
+    if selected_codes != saved_codes:
+        save_watchlist(selected_codes)
 
     st.divider()
     run_analysis = st.button("🔍 분석하기", type="primary", use_container_width=True)
