@@ -1501,6 +1501,52 @@ def _clear_screen_runner() -> None:
         reg["screen"] = None
 
 
+def _render_screen_diagnostics(runner: dict) -> None:
+    """스크리닝 결과 저장 여부 진단 — 항상 표시. save 블록 도달 여부, Gist 응답을 노출."""
+    save_ok = runner.get("save_ok")
+    save_err = runner.get("save_error")
+    stage = runner.get("stage")
+    captured_log = runner.get("sync_log") or []
+
+    try:
+        import cloud_store as _cs
+        live_log = _cs.get_sync_log()[-15:]
+        gist_configured = _cs.is_configured()
+    except Exception:
+        live_log = []
+        gist_configured = None
+
+    if save_err:
+        st.error(f"⚠️ 스크리닝 결과 저장 실패: {save_err}")
+    elif save_ok is None:
+        st.warning(
+            f"⚠️ save 블록 미도달 — 마지막 stage: `{stage}`. "
+            "worker가 save 단계 전에 종료됨."
+        )
+    elif save_ok is True and not gist_configured:
+        st.warning(
+            "⚠️ Gist 미설정 상태로 저장 — 로컬에만 저장됐고 Streamlit Cloud "
+            "재배포 시 사라집니다. (백그라운드 스레드에서 `st.secrets` 접근 실패 의심)"
+        )
+
+    log_to_show = captured_log or live_log
+    with st.expander("🔍 진단: 저장 상태 / Gist 동기화 로그", expanded=bool(save_err) or save_ok is None):
+        st.markdown(
+            f"- `save_ok` = `{save_ok}`\n"
+            f"- `save_error` = `{save_err}`\n"
+            f"- 마지막 `stage` = `{stage}`\n"
+            f"- Gist `is_configured()` (메인 스레드 기준) = `{gist_configured}`\n"
+            f"- 캡처된 sync_log 항목 수 = `{len(captured_log)}`\n"
+            f"- 현재 sync_log 항목 수 = `{len(live_log)}`"
+        )
+        if log_to_show:
+            st.markdown("**최근 sync_log:**")
+            for line in log_to_show:
+                st.code(line, language=None)
+        else:
+            st.caption("(sync_log 비어있음 — `cloud_store.save()` 가 한 번도 호출 안 됨)")
+
+
 def _screen_worker(runner: dict, stock_dict_local: dict[str, str]) -> None:
     universe = runner["universe"]
     min_score = runner["min_score"]
@@ -2613,17 +2659,7 @@ elif _screen_runner is not None and _screen_runner.get("status") in ("done", "er
             f"📌 최종 통과 {len(results)}개가 사이드바 **'최근 스크리닝 후보'** 에 "
             "자동 추가됐습니다. 매일 돌리면 점수 변화·주가 추이·이탈이 추적돼요."
         )
-        _save_ok = _screen_runner.get("save_ok")
-        _save_err = _screen_runner.get("save_error")
-        _sync_log = _screen_runner.get("sync_log") or []
-        if _save_err:
-            st.error(f"⚠️ 스크리닝 결과 저장 실패: {_save_err}")
-        elif _save_ok is False:
-            st.warning("⚠️ 저장 단계가 실행되지 않았습니다.")
-        if _sync_log:
-            with st.expander("🔍 Gist 동기화 로그 (진단용)"):
-                for line in _sync_log:
-                    st.code(line, language=None)
+        _render_screen_diagnostics(_screen_runner)
     else:
         st.warning(
             f"🚫 **조건을 통과한 종목이 없습니다** "
@@ -2661,17 +2697,7 @@ elif _screen_runner is not None and _screen_runner.get("status") in ("done", "er
                 "- 더 넓은 유니버스(KOSPI TOP 50 등) 선택\n"
                 "- 5/15 이후 1Q 보고서가 등록되면 stale 제외 종목들도 후보에 다시 들어옵니다"
             )
-        _save_ok = _screen_runner.get("save_ok")
-        _save_err = _screen_runner.get("save_error")
-        _sync_log = _screen_runner.get("sync_log") or []
-        if _save_err:
-            st.error(f"⚠️ 스크리닝 결과 저장 실패: {_save_err}")
-        elif _save_ok is False:
-            st.warning("⚠️ 저장 단계가 실행되지 않았습니다.")
-        if _sync_log:
-            with st.expander("🔍 Gist 동기화 로그 (진단용)"):
-                for line in _sync_log:
-                    st.code(line, language=None)
+        _render_screen_diagnostics(_screen_runner)
     st.session_state.results = results
     # 다음 트리거(분석/즐겨찾기/단독 등)가 이 분기에 막히지 않도록 러너 비움
     # — 결과는 session_state에 이미 저장됐고, 표 렌더는 마지막 `if results:`에서 처리
