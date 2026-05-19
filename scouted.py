@@ -94,6 +94,39 @@ def add_from_analysis(result: dict, universe: str = "safe") -> bool:
     )
 
 
+def add_many_from_analysis(results: list[dict], universe: str = "safe") -> tuple[int, int]:
+    """스크리닝 결과 리스트를 한 번에 등록 (load 1회 + save 1회).
+    Returns: (새로 추가된 개수, 이미 있어서 건너뛴 개수)
+    """
+    s = load_scouted()
+    today = datetime.now().strftime("%Y-%m-%d")
+    added = 0
+    skipped = 0
+    for result in results:
+        code = result.get("code")
+        if not code:
+            continue
+        if code in s:
+            skipped += 1
+            continue
+        entry: dict = {
+            "added_at": today,
+            "added_score": int(result.get("total", 0)),
+            "universe": universe,
+        }
+        close = result.get("last_close")
+        if close is not None:
+            entry["added_close"] = float(close)
+        compact = _compact_scores(result.get("scores"))
+        if compact:
+            entry["added_scores"] = compact
+        s[code] = entry
+        added += 1
+    if added > 0:
+        save_scouted(s)
+    return added, skipped
+
+
 def add_many(items: list[tuple[str, int]], universe: str = "safe") -> int:
     """새로 추가된 개수 반환 (이미 있는 건 건너뜀).
     items: [(code, score), ...] — 종가·항목별 점수 없이 간단 등록.

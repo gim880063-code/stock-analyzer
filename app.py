@@ -1518,6 +1518,10 @@ def _render_screen_diagnostics(runner: dict) -> None:
         live_log = []
         gist_configured = None
 
+    scouted_added = runner.get("scouted_added")
+    scouted_skipped = runner.get("scouted_skipped")
+    scouted_err = runner.get("scouted_error")
+
     if save_err:
         st.error(f"⚠️ 스크리닝 결과 저장 실패: {save_err}")
     elif save_ok is None:
@@ -1531,11 +1535,26 @@ def _render_screen_diagnostics(runner: dict) -> None:
             "재배포 시 사라집니다. (백그라운드 스레드에서 `st.secrets` 접근 실패 의심)"
         )
 
+    if scouted_err:
+        st.error(f"⚠️ 점수 시뮬레이션(scouted) 저장 실패: {scouted_err}")
+    elif scouted_added == 0 and scouted_skipped and scouted_skipped > 0:
+        st.info(
+            f"ℹ️ 점수 시뮬레이션: 통과 {scouted_skipped}개 모두 이미 추적 중 — "
+            "새로 추가된 종목 없음 (이미 발굴 시점 점수·종가가 기록돼있음)."
+        )
+    elif scouted_added and scouted_added > 0:
+        st.success(
+            f"✅ 점수 시뮬레이션에 **{scouted_added}개** 새로 추가 "
+            f"(이미 추적 중 {scouted_skipped or 0}개는 건너뜀)."
+        )
+
     log_to_show = captured_log or live_log
-    with st.expander("🔍 진단: 저장 상태 / Gist 동기화 로그", expanded=bool(save_err) or save_ok is None):
+    with st.expander("🔍 진단: 저장 상태 / Gist 동기화 로그", expanded=bool(save_err) or save_ok is None or bool(scouted_err)):
         st.markdown(
-            f"- `save_ok` = `{save_ok}`\n"
+            f"- `save_ok` (screening_history) = `{save_ok}`\n"
             f"- `save_error` = `{save_err}`\n"
+            f"- `scouted_added` = `{scouted_added}`, `scouted_skipped` = `{scouted_skipped}`\n"
+            f"- `scouted_error` = `{scouted_err}`\n"
             f"- 마지막 `stage` = `{stage}`\n"
             f"- Gist `is_configured()` (메인 스레드 기준) = `{gist_configured}`\n"
             f"- 캡처된 sync_log 항목 수 = `{len(captured_log)}`\n"
@@ -1730,9 +1749,18 @@ def _screen_worker(runner: dict, stock_dict_local: dict[str, str]) -> None:
     except Exception:
         runner["sync_log"] = []
 
+    runner["scouted_added"] = None
+    runner["scouted_skipped"] = None
+    runner["scouted_error"] = None
     try:
-        for r in results:
-            scouted.add_from_analysis(r, universe=universe)
+        added, skipped = scouted.add_many_from_analysis(results, universe=universe)
+        runner["scouted_added"] = added
+        runner["scouted_skipped"] = skipped
+    except Exception as e:
+        runner["scouted_error"] = f"{type(e).__name__}: {e}"
+    try:
+        import cloud_store as _cs
+        runner["sync_log"] = _cs.get_sync_log()[-15:]
     except Exception:
         pass
 
