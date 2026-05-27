@@ -825,7 +825,7 @@ def _progress_update(
 
 
 # 분석 로직이 바뀔 때마다 이 버전을 올려서 기존 캐시를 무효화
-ANALYZER_VERSION = "v28-2026-05-27-secrets-worker-thread-cache"
+ANALYZER_VERSION = "v29-2026-05-27-expose-dart-api-error"
 if st.session_state.get("_analyzer_cache_version") != ANALYZER_VERSION:
     cached_analyze.clear()
     st.session_state["_analyzer_cache_version"] = ANALYZER_VERSION

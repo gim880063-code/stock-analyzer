@@ -1039,6 +1039,12 @@ def analyze(code: str, lite: bool = False, deep_top: int = 3) -> AnalysisResult:
         try:
             fin = dart.get_financials(code)
             fin_report_label = fin.get("report_label")
+            # report_label=None 인데 _fetch_acnt_all 에서 진짜 API 오류가 있었다면
+            # 그걸 dart_error 로 노출 (이전엔 조용히 무시돼 사용자가 원인을 못 알아냈음)
+            if fin_report_label is None:
+                api_err = dart._get_last_acnt_error()
+                if api_err:
+                    dart_error = api_err
             shares = get_shares_outstanding(code)
             ratios = dart.calc_per_pbr(code, last_close, shares or 0, fin) if shares else {"per": None, "pbr": None}
 

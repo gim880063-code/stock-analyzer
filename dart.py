@@ -204,8 +204,21 @@ def _latest_report_codes() -> list[tuple[int, str]]:
     return candidates
 
 
+# 마지막으로 발생한 DART API 오류 — get_financials 가 모든 fallback 후보를 시도했는데
+# 빈 결과만 나왔을 때 진짜 원인이 무엇인지 (네트워크/키 무효/rate limit 등) 알기 위해 보존.
+# 데이터 없음 (status 013) 은 정상 fallback 흐름이라 기록 안 함.
+_last_acnt_error: str | None = None
+
+
+def _get_last_acnt_error() -> str | None:
+    """가장 최근 _fetch_acnt_all 호출에서의 진짜 오류 (013/데이터없음 제외).
+    analyzer 가 fin_report_label=None 일 때 진단 메시지로 노출."""
+    return _last_acnt_error
+
+
 def _fetch_acnt_all(corp_code: str, year: int, reprt_code: str) -> list[dict]:
     """단일회사 전체 재무제표"""
+    global _last_acnt_error
     try:
         data = _api_get("fnlttSinglAcntAll.json", {
             "corp_code": corp_code,
@@ -213,7 +226,9 @@ def _fetch_acnt_all(corp_code: str, year: int, reprt_code: str) -> list[dict]:
             "reprt_code": reprt_code,
             "fs_div": "CFS",  # 연결재무제표 우선
         })
-    except DartError:
+    except DartError as e:
+        # 데이터 없음 (013) 은 _api_get 이 raise 안 함. 여기서 잡히는 건 진짜 오류.
+        _last_acnt_error = str(e)
         return []
     if data.get("status") == "013":
         # 데이터 없음 → 별도재무제표로 재시도
@@ -224,7 +239,8 @@ def _fetch_acnt_all(corp_code: str, year: int, reprt_code: str) -> list[dict]:
                 "reprt_code": reprt_code,
                 "fs_div": "OFS",
             })
-        except DartError:
+        except DartError as e:
+            _last_acnt_error = str(e)
             return []
     return data.get("list", [])
 
@@ -274,6 +290,9 @@ def get_financials(stock_code: str) -> dict:
     종목의 최신 재무지표 반환.
     실패하거나 데이터 없으면 일부 키가 None.
     """
+    global _last_acnt_error
+    _last_acnt_error = None  # 이 호출 범위에서만 의미 있는 값으로 리셋
+
     result: dict[str, Any] = {
         "report_label": None,    # 예: "2024 사업보고서"
         "net_income": None,
