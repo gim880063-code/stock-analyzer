@@ -61,11 +61,14 @@ MID_TERM_ITEMS = {"추세", "가치", "재무 건전성", "성장성"}
 # 매수/매도 판단에 쓰는 종합점수는 단순 합산보다 가격 반응 가능성이 큰 항목에
 # 더 높은 가중치를 둔다. 실제 예측력은 앱의 점수 시뮬레이션으로 계속 검증한다.
 SCORE_WEIGHTS: dict[str, int] = {
+    # 가격 반응이 즉시 나타나는 단기 신호 — 2배 가중
     "시장 상대강도": 2,
-    "시장 국면": 2,
     "수급": 2,
     "거래량": 2,
     "공시": 2,
+    # 시장 국면은 모든 종목에 같은 ±이 곱해져 종합점수가 시장 trend에 과도 의존 →
+    # 1배로 낮춤. 신호 가치는 있되 종목 selection에 미치는 비중은 줄임.
+    "시장 국면": 1,
     "추세": 1,
     "모멘텀": 1,
     "가격 리스크": 1,
@@ -743,26 +746,27 @@ def trade_signal_from_scores(
     risk_score = score_map.get("가격 리스크", 0)
     ratio = total / max_possible if max_possible > 0 else 0
 
+    # 라벨은 처방형("매수하세요")이 아닌 서술형("긍정 우세") — 사용자 판단 영역 보존.
     if total >= 8 and short_term_score >= 4 and market_score >= 0 and risk_score >= -1:
-        action = "매수 우위"
+        action = "긍정 신호 강함"
         confidence = "높음"
         reason = "가중 종합점수와 단기 수급·가격 반응 신호가 함께 우호적"
     elif total >= 4 and market_score >= 0 and risk_score >= -2:
-        action = "분할 매수 후보"
+        action = "긍정 우세"
         confidence = "보통"
         reason = "긍정 신호가 우세하지만 일부 리스크 확인 필요"
     elif total <= -5 or risk_score <= -3 or market_score < 0:
-        action = "매도·비중축소 검토"
+        action = "위험 신호 강함"
         confidence = "높음" if total <= -5 else "보통"
-        reason = "하락 국면 또는 가격 리스크가 커서 보유 비중 점검 필요"
+        reason = "하락 국면 또는 가격 리스크가 커서 보유 비중·진입 시점 점검 필요"
     elif total <= -1 or ratio < 0:
-        action = "신규 매수 보류"
+        action = "위험 우세"
         confidence = "보통"
         reason = "매수 근거보다 리스크 신호가 우세"
     else:
-        action = "관망"
+        action = "중립"
         confidence = "낮음"
-        reason = "매수·매도 우위가 충분히 갈리지 않음"
+        reason = "긍정·부정 신호가 충분히 갈리지 않음"
 
     return {
         "action": action,
@@ -1017,17 +1021,18 @@ def analyze_and_score_disclosures(
 
 
 def overall_opinion(total: int, max_possible: int) -> str:
-    """매매 목적 점수: 강한 매수/분할매수/관망/매도 검토로 표현."""
+    """가중 종합점수로 신호 강도 표현. 매수/매도 추천이 아닌 자문 톤 유지.
+    최종 판단은 사용자 몫이라는 앱 철학에 맞춰, 명령형이 아닌 서술형으로."""
     ratio = total / max_possible if max_possible > 0 else 0
     if total >= 8 and ratio >= 0.5:
-        return "매수 우위 — 가격 반응 신호와 중기 요인이 함께 우호적입니다."
+        return "긍정 신호 강함 — 다수 지표가 우호적입니다. 단, 이미 가격에 반영됐을 가능성을 고려하세요."
     if total >= 4 and ratio >= 0.25:
-        return "분할 매수 후보 — 긍정 신호가 우세하지만 추격 매수는 나눠서 접근하세요."
+        return "긍정 우세 — 신호는 좋지만 위험 요인도 있어 분할 접근이 안전합니다."
     if total <= -5 or ratio <= -0.3:
-        return "매도·비중축소 검토 — 부정 신호가 우세해 보유 리스크 점검이 필요합니다."
+        return "위험 신호 강함 — 부정 지표가 우세해 보유 비중·진입 시점 점검이 필요합니다."
     if total <= -1:
-        return "신규 매수 보류 — 하락·리스크 신호가 남아 있습니다."
-    return "중립 관망 — 매수·매도 근거가 충분히 갈리지 않았습니다."
+        return "위험 우세 — 하락·리스크 신호가 남아 있어 신규 진입은 신중하세요."
+    return "중립 — 긍정·부정 신호가 비슷해 추가 확인이 필요합니다."
 
 
 def _resolve_name(code: str) -> str:

@@ -876,7 +876,7 @@ def _progress_update(
 
 
 # 분석 로직이 바뀔 때마다 이 버전을 올려서 기존 캐시를 무효화
-ANALYZER_VERSION = "v30-2026-05-27-gist-financials-cache"
+ANALYZER_VERSION = "v31-2026-05-28-tone-balance-bucket-recalibration"
 if st.session_state.get("_analyzer_cache_version") != ANALYZER_VERSION:
     cached_analyze.clear()
     st.session_state["_analyzer_cache_version"] = ANALYZER_VERSION
@@ -1255,45 +1255,51 @@ def render_stock_card(r: dict, favorites: list[str]) -> None:
         mt_max = r.get("mid_term_max", 0)
         m2.caption(
             f"단기 **{st_score:+d}**/{st_max} · 중기 **{mt_score:+d}**/{mt_max}  \n"
-            f":gray[종합점수는 가격 반응 신호(시장 국면·상대강도·수급·거래량·공시)에 가중치 적용]"
+            f":gray[종합점수는 가격 반응 신호(상대강도·수급·거래량·공시 ×2)에 가중치 적용]"
         )
         m3.metric("의견", f"{opinion_emoji(r['total'])} {r['opinion'].split(' — ')[0]}")
 
+        # 매매 가이드는 참고용 — 기본 접힘, 사용자가 명시적으로 펼쳤을 때만 표시.
+        # "매수하세요/매도하세요" 같은 추천이 아니라 ATR 기반 손절/목표가 산정 참고치.
         plan = r.get("trade_plan") or {}
-        if plan:
+        if plan and plan.get("entry_price"):
             action = plan.get("action", "-")
             confidence = plan.get("confidence", "-")
             reason = plan.get("reason", "")
-            if "매수" in action:
-                plan_color = "#1f7a3a"
-                plan_bg = "rgba(46,160,67,0.10)"
-            elif "매도" in action or "축소" in action:
-                plan_color = "#a3201a"
-                plan_bg = "rgba(248,81,73,0.10)"
+            # 라벨 첫 마디만 보여 expander 헤더에 — 펼치기 전에도 톤은 알 수 있게
+            if "긍정" in action:
+                emoji = "🟢"
+            elif "위험" in action:
+                emoji = "🔴"
             else:
-                plan_color = "#5f6b7a"
-                plan_bg = "rgba(95,107,122,0.10)"
+                emoji = "⚪"
 
-            risk_line = ""
-            if plan.get("stop_loss") and plan.get("target_1r") and plan.get("target_2r"):
-                risk_pct = plan.get("risk_pct")
-                risk_text = f" · 리스크 {risk_pct:.1f}%" if isinstance(risk_pct, (int, float)) else ""
-                risk_line = (
-                    f"<br><span style='color:#334155'>손절 기준 "
-                    f"<b>{plan['stop_loss']:,.0f}원</b>{risk_text} · "
-                    f"1R <b>{plan['target_1r']:,.0f}원</b> · "
-                    f"2R <b>{plan['target_2r']:,.0f}원</b></span>"
+            with st.expander(f"📈 참고용 매매 가이드 ({emoji} {action}) — 추천 아님, 손절·목표가 산정용", expanded=False):
+                st.caption(
+                    "⚠️ **이것은 매수·매도 추천이 아닙니다.** "
+                    "점수와 ATR(평균 변동폭) 기반의 일반적인 손절/목표가 *후보*일 뿐, "
+                    "사용자 본인의 리스크 허용도·포지션 크기·전략에 맞게 직접 조정하세요."
                 )
-            st.markdown(
-                f"<div style='padding:10px 12px;border-radius:6px;"
-                f"background:{plan_bg};border-left:4px solid {plan_color};margin:8px 0 10px'>"
-                f"<b style='color:{plan_color}'>매매 신호: {action}</b> "
-                f"<span style='color:#64748b'>· 신뢰도 {confidence}</span><br>"
-                f"<span style='color:#334155'>{reason}</span>"
-                f"{risk_line}"
-                f"</div>",
-                unsafe_allow_html=True,
-            )
+                st.markdown(
+                    f"- **신호 강도**: {action} · 신뢰도 {confidence}\n"
+                    f"- **근거**: {reason}"
+                )
+                if plan.get("stop_loss") and plan.get("target_1r") and plan.get("target_2r"):
+                    risk_pct = plan.get("risk_pct")
+                    risk_text = f" (현재가 대비 {risk_pct:.1f}%)" if isinstance(risk_pct, (int, float)) else ""
+                    atr_text = (
+                        f" · ATR(14일) {plan['atr14']:,.0f}원"
+                        if plan.get("atr14") else ""
+                    )
+                    st.markdown(
+                        f"- **손절가 후보**: {plan['stop_loss']:,.0f}원{risk_text}{atr_text}\n"
+                        f"- **1R 목표**: {plan['target_1r']:,.0f}원 (리스크 1배 이익)\n"
+                        f"- **2R 목표**: {plan['target_2r']:,.0f}원 (리스크 2배 이익)"
+                    )
+                    st.caption(
+                        "*R(Risk) = 진입가 - 손절가*. "
+                        "1R 목표는 손절폭만큼의 이익 (손익비 1:1), 2R은 2배 (1:2)."
+                    )
 
         # 보유 종목이면 손익 badge
         portfolio_local = port.load_portfolio()

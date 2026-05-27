@@ -98,12 +98,15 @@ class ScoringTests(unittest.TestCase):
         self.assertEqual(total, 5)
         self.assertEqual(max_possible, 5)
 
-    def test_market_regime_is_weighted_as_price_prediction_signal(self):
+    def test_market_regime_uses_weight_one_to_avoid_market_overdominance(self):
+        # 시장 국면은 모든 종목에 같은 ± 부여 → 종합점수가 시장 trend에 과도 의존하지
+        # 않게 가중치 1로 고정. 가격 반응 신호 (수급/거래량/공시/시장 상대강도, 가중치 2)
+        # 와 차별화.
         total, max_possible = analyzer.weighted_score([
             {"name": "시장 국면", "score": 1, "max": 1},
         ])
-        self.assertEqual(total, 2)
-        self.assertEqual(max_possible, 2)
+        self.assertEqual(total, 1)
+        self.assertEqual(max_possible, 1)
 
     def test_oversold_rsi_is_not_counted_as_buy_signal_by_itself(self):
         df = pd.DataFrame({"Close": list(range(100, 60, -1))})
@@ -111,9 +114,16 @@ class ScoringTests(unittest.TestCase):
         self.assertLessEqual(item["score"], 0)
         self.assertIn("과매도", item["msg"])
 
-    def test_opinion_thresholds_are_trading_oriented(self):
-        self.assertTrue(analyzer.overall_opinion(8, 15).startswith("매수 우위"))
-        self.assertTrue(analyzer.overall_opinion(-5, 15).startswith("매도"))
+    def test_opinion_text_stays_advisory_not_prescriptive(self):
+        # 앱 철학: 매수/매도 추천 아님. 처방형("매수하세요") 금지, 서술형 유지.
+        positive = analyzer.overall_opinion(8, 15)
+        negative = analyzer.overall_opinion(-5, 15)
+        self.assertTrue(positive.startswith("긍정"))
+        self.assertTrue(negative.startswith("위험"))
+        # 처방형 키워드는 들어가면 안 됨
+        for text in [positive, negative]:
+            self.assertNotIn("매수하세요", text)
+            self.assertNotIn("매도하세요", text)
 
     def test_trade_plan_adds_stop_and_reward_targets(self):
         close = list(range(100, 130))
@@ -133,10 +143,34 @@ class ScoringTests(unittest.TestCase):
         total, max_possible = analyzer.weighted_score(scores)
         short_total, _ = analyzer.weighted_score(scores, analyzer.SHORT_TERM_ITEMS)
         plan = analyzer.build_trade_plan(df, scores, total, short_total, max_possible)
-        self.assertEqual(plan["action"], "매수 우위")
+        # action 라벨도 서술형 — "매수 우위" 같은 처방형 아님
+        self.assertEqual(plan["action"], "긍정 신호 강함")
         self.assertLess(plan["stop_loss"], plan["entry_price"])
         self.assertGreater(plan["target_1r"], plan["entry_price"])
         self.assertGreater(plan["target_2r"], plan["target_1r"])
+
+
+class VerifierConsistencyTests(unittest.TestCase):
+    """가중치 정책이 바뀌어도 시뮬레이션 bucket 분석이 일관성 유지하는지."""
+
+    def test_total_score_recomputed_when_added_scores_present(self):
+        """added_scores 가 있으면 stored added_score 무시하고 현재 가중치로 재계산."""
+        import verifier
+        info = {
+            "added_score": 999,  # 의도적으로 비현실적 값 — 무시되어야
+            "added_scores": {
+                "시장 상대강도": 1,  # weight 2 → 2
+                "수급": 1,            # weight 2 → 2
+                "추세": 1,            # weight 1 → 1
+            },
+        }
+        self.assertEqual(verifier._extract_score(info, "total"), 5)
+
+    def test_total_falls_back_to_stored_for_legacy_entries(self):
+        """added_scores 없는 옛 엔트리는 stored added_score 그대로."""
+        import verifier
+        info = {"added_score": 7}
+        self.assertEqual(verifier._extract_score(info, "total"), 7)
 
 
 if __name__ == "__main__":

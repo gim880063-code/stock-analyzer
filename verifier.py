@@ -28,10 +28,27 @@ SCORE_TYPES = ("total", "short_term", "mid_term")
 
 
 def _extract_score(info: dict, score_type: str) -> int | None:
-    """발굴 엔트리에서 지정한 점수 종류 추출. 데이터 없으면 None."""
-    if score_type == "total":
-        return info.get("added_score")
+    """발굴 엔트리에서 지정한 점수 종류 추출. 데이터 없으면 None.
+
+    가중치 일관성 보장: added_scores (항목별 스냅샷) 가 있으면 *항상* 현재
+    SCORE_WEIGHTS 로 재계산. 이렇게 안 하면 가중치 도입 이전 발굴분의
+    added_score (단순합산) 과 이후 (가중합산) 가 섞여 bucket 분석이 왜곡됨.
+
+    added_scores 없는 옛 엔트리 (2026-05 이전) 만 저장된 added_score 사용.
+    """
     added_scores = info.get("added_scores")
+
+    if score_type == "total":
+        # 항목별 스냅샷 있으면 가중 재계산 — 가중치 정책 바뀌어도 일관성 유지
+        if added_scores:
+            score_items = [
+                {"name": k, "score": int(v), "max": 1}
+                for k, v in added_scores.items()
+            ]
+            return weighted_score(score_items)[0]
+        # 옛 엔트리 fallback (단순합산 그대로 — 가중치 도입 이전 데이터)
+        return info.get("added_score")
+
     if not added_scores:
         return None
     if score_type == "short_term":
@@ -49,17 +66,21 @@ def _extract_score(info: dict, score_type: str) -> int | None:
 
 
 # 점수 구간 — 종합/단기/중기 점수는 max 값이 달라서 bucket도 다르게.
-# 종합 max ≈ 9~12, 단기 max ≈ 4, 중기 max ≈ 7.
+# 2026-05 가중치 도입 후 max 값:
+#   종합 max ≈ 16 (단기 9 + 중기 6 + 추세·모멘텀·가격리스크 가중 1)
+#   단기 max ≈ 9 (거래량·수급·공시·시장상대강도 각 2 + 시장 국면 1)
+#   중기 max ≈ 6 (가치·재무·성장성·추세 — 가중치 영향 없음)
+# 비율 기준 (≥66% 강력 / 33~63% 긍정 / 12~32% 중립+ / <12% 관망) 유지하며 재조정.
 _BUCKETS_TOTAL = [
-    ("≥8 (강력)", lambda s: s >= 8),
-    ("5~7 (긍정)", lambda s: 5 <= s <= 7),
-    ("2~4 (중립+)", lambda s: 2 <= s <= 4),
+    ("≥11 (강력)", lambda s: s >= 11),
+    ("6~10 (긍정)", lambda s: 6 <= s <= 10),
+    ("2~5 (중립+)", lambda s: 2 <= s <= 5),
     ("≤1 (관망)", lambda s: s <= 1),
 ]
 _BUCKETS_SHORT = [
-    ("≥3 (강력)", lambda s: s >= 3),
-    ("1~2 (긍정)", lambda s: 1 <= s <= 2),
-    ("0 (중립)", lambda s: s == 0),
+    ("≥6 (강력)", lambda s: s >= 6),
+    ("2~5 (긍정)", lambda s: 2 <= s <= 5),
+    ("0~1 (중립)", lambda s: 0 <= s <= 1),
     ("≤-1 (관망)", lambda s: s <= -1),
 ]
 _BUCKETS_MID = [
@@ -86,10 +107,19 @@ def _latest_entry_from_history(code: str) -> dict | None:
 
 def _extract_score_from_entry(entry: dict, score_type: str) -> int | None:
     """history entry에서 지정한 점수 종류 추출. 발굴 entry의 _extract_score와
-    같은 로직이지만 필드명이 다름 (total/scores vs added_score/added_scores)."""
-    if score_type == "total":
-        return entry.get("total")
+    같은 로직이지만 필드명이 다름 (total/scores vs added_score/added_scores).
+    가중치 일관성 유지를 위해 scores 있으면 항상 현재 SCORE_WEIGHTS 로 재계산."""
     scores = entry.get("scores")
+
+    if score_type == "total":
+        if scores:
+            score_items = [
+                {"name": k, "score": int(v), "max": 1}
+                for k, v in scores.items()
+            ]
+            return weighted_score(score_items)[0]
+        return entry.get("total")
+
     if not scores:
         return None
     if score_type == "short_term":
