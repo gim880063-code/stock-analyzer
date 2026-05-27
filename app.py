@@ -979,12 +979,20 @@ def _build_drop_reason(r: dict, min_score: int | None = None, kind: str = "score
     if kind == "stale":
         base = "재무 데이터가 오래됐고 잠정실적공시도 없어 스크리닝에서 제외"
     elif kind == "surge":
-        triggers = (r.get("recent_surge") or {}).get("triggers") or []
+        surge_info = r.get("recent_surge") or {}
+        triggers = surge_info.get("triggers") or []
+        is_fundamental = surge_info.get("fundamental_backed_out", False)
         if triggers:
-            base = (
-                f"발굴 시점 직전 급등 감지({', '.join(triggers)}) — "
-                "고점 추격 회피용 자동 제외"
-            )
+            if is_fundamental:
+                base = (
+                    f"펀더멘털 없는 급등 감지({', '.join(triggers)}) — "
+                    "실적 뒷받침 없는 단기 상승으로 자동 제외"
+                )
+            else:
+                base = (
+                    f"발굴 시점 직전 급등 감지({', '.join(triggers)}) — "
+                    "고점 추격 회피용 자동 제외"
+                )
         else:
             base = "발굴 시점 직전 단기 급등 — 평균 회귀 위험으로 자동 제외"
     elif kind == "deep":
@@ -2491,10 +2499,12 @@ if st.session_state.get("_view_mode") == "verifier":
             st.markdown("##### 종목별 상세")
             detail_rows = []
             for r in result["rows"]:
+                cur_score = r.get("current_score")
                 detail_rows.append({
                     "종목": f"{stock_dict.get(r['code'], '?')} ({r['code']})",
                     "발굴일": r["added_at"] or "-",
                     "발굴점수": f"{r['added_score']:+d}" if r["added_score"] is not None else "-",
+                    "현재점수": f"{cur_score:+d}" if cur_score is not None else "-",
                     "발굴가": f"{r['added_close']:,.0f}",
                     "현재가": f"{r['current_close']:,.0f}",
                     "수익률(%)": r["return_pct"],

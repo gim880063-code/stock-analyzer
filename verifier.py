@@ -73,13 +73,27 @@ def _buckets_for(score_type: str):
     return _BUCKETS_TOTAL
 
 
-def _latest_close_from_history(code: str) -> tuple[str | None, float | None]:
-    """history에 저장된 가장 최근 (date, close). 없으면 (None, None)."""
+def _latest_entry_from_history(code: str) -> dict | None:
+    """history에 저장된 가장 최근 entry. 없으면 None."""
     entries = history.get_history(code, days=365)
-    if not entries:
-        return None, None
-    last = entries[-1]
-    return last.get("date"), last.get("close")
+    return entries[-1] if entries else None
+
+
+def _extract_score_from_entry(entry: dict, score_type: str) -> int | None:
+    """history entry에서 지정한 점수 종류 추출. 발굴 entry의 _extract_score와
+    같은 로직이지만 필드명이 다름 (total/scores vs added_score/added_scores)."""
+    if score_type == "total":
+        return entry.get("total")
+    scores = entry.get("scores")
+    if not scores:
+        return None
+    if score_type == "short_term":
+        items = SHORT_TERM_ITEMS
+    elif score_type == "mid_term":
+        items = MID_TERM_ITEMS
+    else:
+        return None
+    return sum(int(v) for k, v in scores.items() if k in items)
 
 
 def _bucket_stats(rows: list[dict], value_key: str, score_key: str, score_type: str = "total") -> dict:
@@ -137,7 +151,10 @@ def verify_scouted(score_type: str = "total") -> dict:
         score = _extract_score(info, score_type)
         if score is None:
             continue
-        last_date, last_close = _latest_close_from_history(code)
+        last_entry = _latest_entry_from_history(code)
+        if not last_entry:
+            continue
+        last_close = last_entry.get("close")
         if not last_close:
             continue
         ret_pct = (last_close / added_close - 1) * 100
@@ -147,7 +164,8 @@ def verify_scouted(score_type: str = "total") -> dict:
             "added_score": score,
             "added_close": added_close,
             "current_close": last_close,
-            "current_date": last_date,
+            "current_date": last_entry.get("date"),
+            "current_score": _extract_score_from_entry(last_entry, score_type),
             "return_pct": round(ret_pct, 2),
             "universe": info.get("universe", ""),
         })
