@@ -49,19 +49,20 @@ UNIVERSE_LABELS = {
 # ─────────── 점수 항목 분류 ───────────
 # 시간 축이 맞는 항목끼리 부분합을 따로 계산해 매매 기간에 맞는 신호를 본다.
 # 학술·실무 근거:
-#   - 단기(1~4주) 예측력 있는 팩터: 거래량, 수급, 공시, 시장 상대강도
+#   - 단기(1~4주) 예측력 있는 팩터: 거래량, 수급, 공시, 시장 상대강도, 시장 국면
 #   - 중기(분기~) 예측력 있는 팩터: 추세, 가치, 재무 건전성, 성장성
 #   - 의심 항목: 모멘텀(RSI 14), 가격 리스크
 #     - RSI(14)는 학술적으로 약한 mean-reversion 신호. 한국시장에서 검증 필요.
 #     - 가격 리스크는 강세 종목을 깎아서 단기 momentum factor를 거꾸로 작용할 가능성.
 #     - 일단 종합점수엔 남기되 부분합엔 미포함 → 시뮬레이션 비교로 검증 후 거취 결정.
-SHORT_TERM_ITEMS = {"거래량", "수급", "공시", "시장 상대강도"}
+SHORT_TERM_ITEMS = {"거래량", "수급", "공시", "시장 상대강도", "시장 국면"}
 MID_TERM_ITEMS = {"추세", "가치", "재무 건전성", "성장성"}
 
 # 매수/매도 판단에 쓰는 종합점수는 단순 합산보다 가격 반응 가능성이 큰 항목에
 # 더 높은 가중치를 둔다. 실제 예측력은 앱의 점수 시뮬레이션으로 계속 검증한다.
 SCORE_WEIGHTS: dict[str, int] = {
     "시장 상대강도": 2,
+    "시장 국면": 2,
     "수급": 2,
     "거래량": 2,
     "공시": 2,
@@ -204,6 +205,7 @@ class AnalysisResult(TypedDict):
     disclosures: list[dict]  # 최근 30일 DART 공시 목록
     news: list[dict]  # 최근 종목 뉴스 (참고용, 점수 영향 없음)
     preliminary: dict | None  # 잠정실적공시에서 추출한 최신 실적 (있으면)
+    trade_plan: dict
     sources: dict  # 데이터 출처 + 기준 시점
 
 
@@ -528,7 +530,7 @@ def _market_index_cached(market: str, date_key: str) -> pd.DataFrame:
     """시장 지수 데이터 캐시 — date_key를 일별로 바꿔 매일 1회 fetch."""
     idx_code = "KS11" if market == "KOSPI" else "KQ11"
     end = datetime.now()
-    start = end - timedelta(days=120)
+    start = end - timedelta(days=260)
     return fdr.DataReader(idx_code, start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"))
 
 
@@ -579,6 +581,47 @@ def score_market_relative(df: pd.DataFrame, code: str) -> ScoreItem | None:
 
     msg = f"{label} (20일, 종목 {stock_ret:+.1f}% vs {market} {market_ret:+.1f}%)"
     return {"name": "시장 상대강도", "score": score, "msg": msg, "max": 1}
+
+
+def score_market_regime(code: str) -> ScoreItem | None:
+    """
+    KOSPI/KOSDAQ 자체의 추세 필터.
+    상승장에서는 종목 모멘텀이 더 잘 이어지고, 하락장에서는 좋은 종목도 동반 하락할
+    위험이 커서 매수 점수 신뢰도를 낮춘다.
+    """
+    try:
+        market = _stock_market(code)
+        market_df = _market_index_data(market)
+    except Exception:
+        return None
+
+    if market_df is None or len(market_df) < 60:
+        return None
+
+    close = market_df["Close"].dropna()
+    if len(close) < 60:
+        return None
+
+    last = float(close.iloc[-1])
+    ma20 = float(close.rolling(20).mean().iloc[-1])
+    ma60 = float(close.rolling(60).mean().iloc[-1])
+    ret20 = (last / float(close.iloc[-21]) - 1) * 100 if len(close) >= 21 else 0
+    ret60 = (last / float(close.iloc[-61]) - 1) * 100 if len(close) >= 61 else 0
+
+    if last > ma60 and ma20 > ma60 and ret20 > 0:
+        score, label = 1, "상승 국면"
+    elif last < ma60 and ma20 < ma60 and ret20 < 0:
+        score, label = -1, "하락 국면"
+    elif ret60 < -8 and last < ma60:
+        score, label = -1, "약세 지속"
+    else:
+        score, label = 0, "중립/혼조"
+
+    msg = (
+        f"{market} {label} "
+        f"(20일 {ret20:+.1f}%, 60일 {ret60:+.1f}%, 지수 {last:,.0f} vs 60일선 {ma60:,.0f})"
+    )
+    return {"name": "시장 국면", "score": score, "msg": msg, "max": 1}
 
 
 def score_risk(df: pd.DataFrame) -> ScoreItem:
@@ -664,6 +707,112 @@ def score_risk(df: pd.DataFrame) -> ScoreItem:
     return {"name": "가격 리스크", "score": score, "msg": msg, "max": 0}
 
 
+def calc_atr(df: pd.DataFrame, period: int = 14) -> float | None:
+    """Average True Range for stop-loss distance."""
+    needed = {"High", "Low", "Close"}
+    if df is None or len(df) < period + 1 or not needed.issubset(df.columns):
+        return None
+    high = df["High"].astype(float)
+    low = df["Low"].astype(float)
+    close = df["Close"].astype(float)
+    prev_close = close.shift(1)
+    true_range = pd.concat([
+        high - low,
+        (high - prev_close).abs(),
+        (low - prev_close).abs(),
+    ], axis=1).max(axis=1)
+    atr = true_range.rolling(period).mean().iloc[-1]
+    if pd.isna(atr) or atr <= 0:
+        return None
+    return float(atr)
+
+
+def trade_signal_from_scores(
+    scores: list[dict],
+    total: int,
+    short_term_score: int,
+    max_possible: int,
+) -> dict:
+    """Convert weighted score components into a trading-oriented signal."""
+    score_map = {
+        s.get("name"): int(s.get("score", 0))
+        for s in scores
+        if isinstance(s, dict)
+    }
+    market_score = score_map.get("시장 국면", 0)
+    risk_score = score_map.get("가격 리스크", 0)
+    ratio = total / max_possible if max_possible > 0 else 0
+
+    if total >= 8 and short_term_score >= 4 and market_score >= 0 and risk_score >= -1:
+        action = "매수 우위"
+        confidence = "높음"
+        reason = "가중 종합점수와 단기 수급·가격 반응 신호가 함께 우호적"
+    elif total >= 4 and market_score >= 0 and risk_score >= -2:
+        action = "분할 매수 후보"
+        confidence = "보통"
+        reason = "긍정 신호가 우세하지만 일부 리스크 확인 필요"
+    elif total <= -5 or risk_score <= -3 or market_score < 0:
+        action = "매도·비중축소 검토"
+        confidence = "높음" if total <= -5 else "보통"
+        reason = "하락 국면 또는 가격 리스크가 커서 보유 비중 점검 필요"
+    elif total <= -1 or ratio < 0:
+        action = "신규 매수 보류"
+        confidence = "보통"
+        reason = "매수 근거보다 리스크 신호가 우세"
+    else:
+        action = "관망"
+        confidence = "낮음"
+        reason = "매수·매도 우위가 충분히 갈리지 않음"
+
+    return {
+        "action": action,
+        "confidence": confidence,
+        "reason": reason,
+    }
+
+
+def build_trade_plan(
+    df: pd.DataFrame,
+    scores: list[dict],
+    total: int,
+    short_term_score: int,
+    max_possible: int,
+) -> dict:
+    """
+    Score-based trade plan. It is a risk-management guide, not a price guarantee.
+    """
+    last = float(df["Close"].iloc[-1])
+    atr = calc_atr(df)
+    signal = trade_signal_from_scores(scores, total, short_term_score, max_possible)
+
+    stop_loss = None
+    target_1r = None
+    target_2r = None
+    risk_pct = None
+    if atr:
+        ma20 = df["Close"].rolling(20).mean().iloc[-1] if len(df) >= 20 else None
+        atr_stop = last - 2 * atr
+        ma_stop = float(ma20) * 0.97 if ma20 is not None and not pd.isna(ma20) else atr_stop
+        stop_loss = min(last * 0.97, max(atr_stop, ma_stop))
+        if stop_loss >= last:
+            stop_loss = atr_stop
+        risk = last - stop_loss
+        if risk > 0:
+            target_1r = last + risk
+            target_2r = last + 2 * risk
+            risk_pct = risk / last * 100
+
+    return {
+        **signal,
+        "entry_price": last,
+        "stop_loss": round(stop_loss, 2) if stop_loss else None,
+        "target_1r": round(target_1r, 2) if target_1r else None,
+        "target_2r": round(target_2r, 2) if target_2r else None,
+        "risk_pct": round(risk_pct, 2) if risk_pct is not None else None,
+        "atr14": round(atr, 2) if atr else None,
+    }
+
+
 def recompute_score_after_deep(result: dict) -> None:
     """
     깊이 분석이 공시 카테고리를 바꿨을 수 있으니 종합점수·의견을 재계산.
@@ -715,6 +864,10 @@ def recompute_score_after_deep(result: dict) -> None:
     result["short_term_max"] = short_term_max
     result["mid_term_score"] = mid_term_score
     result["mid_term_max"] = mid_term_max
+    if result.get("trade_plan"):
+        result["trade_plan"].update(
+            trade_signal_from_scores(scores, total, short_term_score, max_possible)
+        )
 
     # 깊이 분석으로 점수가 바뀌었을 수 있으니 history 스냅샷도 새 값으로 덮어씀
     # → 검증 도구가 "사용자에게 실제로 보여진 점수" 기준으로 수익률 계산하게 됨
@@ -1017,7 +1170,7 @@ def analyze(code: str, lite: bool = False, deep_top: int = 3) -> AnalysisResult:
             "change_pct": 0, "scores": [], "total": 0, "opinion": "",
             **_empty_partials,
             "error": f"데이터 조회 실패: {e}", "history": [], "disclosures": [],
-            "news": [], "preliminary": None, "sources": {},
+            "news": [], "preliminary": None, "trade_plan": {}, "sources": {},
         }
 
     if df.empty:
@@ -1026,7 +1179,7 @@ def analyze(code: str, lite: bool = False, deep_top: int = 3) -> AnalysisResult:
             "change_pct": 0, "scores": [], "total": 0, "opinion": "",
             **_empty_partials,
             "error": "가격 데이터가 비어 있습니다.", "history": [], "disclosures": [],
-            "news": [], "preliminary": None, "sources": {},
+            "news": [], "preliminary": None, "trade_plan": {}, "sources": {},
         }
 
     last_close = float(df["Close"].iloc[-1])
@@ -1041,6 +1194,9 @@ def analyze(code: str, lite: bool = False, deep_top: int = 3) -> AnalysisResult:
     market_rel = score_market_relative(df, code)
     if market_rel is not None:
         scores.append(market_rel)
+    market_regime = score_market_regime(code)
+    if market_regime is not None:
+        scores.append(market_regime)
 
     flow_last_date: str | None = None
     fin_report_label: str | None = None
@@ -1194,6 +1350,7 @@ def analyze(code: str, lite: bool = False, deep_top: int = 3) -> AnalysisResult:
     }
 
     opinion_text = overall_opinion(total, max_possible)
+    trade_plan = build_trade_plan(df, scores, total, short_term_score, max_possible)
 
     # 매일 점수 스냅샷 저장 (같은 날 중복은 덮어씀)
     # 항목별 점수도 함께 저장 → 검증 도구에서 어떤 항목이 예측력 있었는지 분석 가능
@@ -1220,6 +1377,7 @@ def analyze(code: str, lite: bool = False, deep_top: int = 3) -> AnalysisResult:
         "disclosures": disclosures,
         "news": news_items,
         "preliminary": preliminary,
+        "trade_plan": trade_plan,
         "recent_surge": _check_fundamental_backed_surge(
             df, _compute_recent_surge(df), fin, preliminary,
         ),
@@ -1256,6 +1414,17 @@ def render_text(result: AnalysisResult) -> str:
     lines.append("━" * 40)
     lines.append(f"  종합점수: {result['total']:+d}점")
     lines.append(f"  종합의견: {result['opinion']}")
+    plan = result.get("trade_plan") or {}
+    if plan:
+        lines.append(
+            f"  매매계획: {plan.get('action', '-')} "
+            f"(신뢰도 {plan.get('confidence', '-')})"
+        )
+        if plan.get("stop_loss") and plan.get("target_1r"):
+            lines.append(
+                f"  손절/목표: {plan['stop_loss']:,.0f}원 / "
+                f"{plan['target_1r']:,.0f}원 / {plan.get('target_2r', 0):,.0f}원"
+            )
     lines.append("━" * 40)
     return "\n".join(lines)
 

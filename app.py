@@ -894,7 +894,7 @@ def opinion_emoji(total: int) -> str:
 
 SCORE_COLUMNS = [
     "추세", "모멘텀", "거래량", "가격 리스크",
-    "시장 상대강도", "수급", "공시",
+    "시장 상대강도", "시장 국면", "수급", "공시",
     "가치", "재무 건전성", "성장성",
 ]
 
@@ -1247,9 +1247,45 @@ def render_stock_card(r: dict, favorites: list[str]) -> None:
         mt_max = r.get("mid_term_max", 0)
         m2.caption(
             f"단기 **{st_score:+d}**/{st_max} · 중기 **{mt_score:+d}**/{mt_max}  \n"
-            f":gray[종합점수는 가격 반응 신호(상대강도·수급·거래량·공시)에 가중치 적용]"
+            f":gray[종합점수는 가격 반응 신호(시장 국면·상대강도·수급·거래량·공시)에 가중치 적용]"
         )
         m3.metric("의견", f"{opinion_emoji(r['total'])} {r['opinion'].split(' — ')[0]}")
+
+        plan = r.get("trade_plan") or {}
+        if plan:
+            action = plan.get("action", "-")
+            confidence = plan.get("confidence", "-")
+            reason = plan.get("reason", "")
+            if "매수" in action:
+                plan_color = "#1f7a3a"
+                plan_bg = "rgba(46,160,67,0.10)"
+            elif "매도" in action or "축소" in action:
+                plan_color = "#a3201a"
+                plan_bg = "rgba(248,81,73,0.10)"
+            else:
+                plan_color = "#5f6b7a"
+                plan_bg = "rgba(95,107,122,0.10)"
+
+            risk_line = ""
+            if plan.get("stop_loss") and plan.get("target_1r") and plan.get("target_2r"):
+                risk_pct = plan.get("risk_pct")
+                risk_text = f" · 리스크 {risk_pct:.1f}%" if isinstance(risk_pct, (int, float)) else ""
+                risk_line = (
+                    f"<br><span style='color:#334155'>손절 기준 "
+                    f"<b>{plan['stop_loss']:,.0f}원</b>{risk_text} · "
+                    f"1R <b>{plan['target_1r']:,.0f}원</b> · "
+                    f"2R <b>{plan['target_2r']:,.0f}원</b></span>"
+                )
+            st.markdown(
+                f"<div style='padding:10px 12px;border-radius:6px;"
+                f"background:{plan_bg};border-left:4px solid {plan_color};margin:8px 0 10px'>"
+                f"<b style='color:{plan_color}'>매매 신호: {action}</b> "
+                f"<span style='color:#64748b'>· 신뢰도 {confidence}</span><br>"
+                f"<span style='color:#334155'>{reason}</span>"
+                f"{risk_line}"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
 
         # 보유 종목이면 손익 badge
         portfolio_local = port.load_portfolio()
