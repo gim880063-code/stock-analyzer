@@ -33,3 +33,6 @@ test_*.py
 scratch_*.py
 !tests/
 !tests/test_*.py
+
+# Claude Code 개인 설정 (settings.json 은 팀 공유, settings.local.json 은 본인 전용)
+.claude/settings.local.json
