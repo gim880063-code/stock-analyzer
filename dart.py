@@ -24,15 +24,27 @@ DATA_DIR = Path(__file__).parent / "data"
 
 
 def _get_api_key() -> str:
-    """API 키 조회 — Streamlit Cloud secrets 우선, 로컬 .env 백업"""
-    # 1) Streamlit Cloud의 st.secrets (배포 환경)
+    """API 키 조회 — Streamlit Cloud secrets 우선, 로컬 .env 백업.
+
+    워커 스레드 대응: 한 번이라도 st.secrets 에서 읽으면 os.environ 에 캐싱.
+    Streamlit 워커 스레드는 st.secrets 접근이 실패할 수 있는데, env var는 프로세스
+    전역이라 어느 스레드에서나 읽힘.
+    """
+    # 1) 이미 env에 있으면 그대로 사용 (워커 스레드 fast path + secrets fallback)
+    cached = os.environ.get("DART_API_KEY", "").strip()
+    if cached:
+        return cached
+    # 2) Streamlit secrets (배포 환경, 보통 메인 스레드)
     try:
         import streamlit as st
         if "DART_API_KEY" in st.secrets:
-            return str(st.secrets["DART_API_KEY"]).strip()
-    except (ImportError, FileNotFoundError, AttributeError, Exception):
+            key = str(st.secrets["DART_API_KEY"]).strip()
+            if key:
+                os.environ["DART_API_KEY"] = key  # 워커 스레드용 캐시
+                return key
+    except Exception:
         pass
-    # 2) 로컬 .env 파일 (개발 환경)
+    # 3) 로컬 .env (개발 환경)
     load_dotenv(ENV_PATH, override=True)
     return os.environ.get("DART_API_KEY", "").strip()
 CORP_CODE_CACHE = DATA_DIR / "corp_codes.json"

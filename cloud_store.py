@@ -46,16 +46,24 @@ def get_sync_log() -> list[str]:
 
 
 def _get_credentials() -> tuple[str, str]:
-    # 1) Streamlit Cloud secrets (배포 환경)
+    """워커 스레드 대응으로 한 번 읽으면 os.environ 에 캐싱 (dart/llm 과 동일 패턴)."""
+    # 1) 이미 env에 있으면 그대로 (워커 스레드 fast path)
+    cached_pat = os.environ.get("GITHUB_PAT", "").strip()
+    cached_gid = os.environ.get("GIST_ID", "").strip()
+    if cached_pat and cached_gid:
+        return cached_pat, cached_gid
+    # 2) Streamlit Cloud secrets (배포 환경, 메인 스레드)
     try:
         import streamlit as st
         pat = str(st.secrets.get("GITHUB_PAT", "")).strip()
         gist_id = str(st.secrets.get("GIST_ID", "")).strip()
         if pat and gist_id:
+            os.environ["GITHUB_PAT"] = pat   # 워커 스레드용 캐시
+            os.environ["GIST_ID"] = gist_id
             return pat, gist_id
     except Exception:
         pass
-    # 2) .env (로컬 환경)
+    # 3) .env (로컬 환경)
     load_dotenv(ENV_PATH, override=True)
     return (
         os.environ.get("GITHUB_PAT", "").strip(),

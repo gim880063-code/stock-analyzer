@@ -31,12 +31,19 @@ PRO_MODEL = "gemini-flash-latest"  # 깊이 분석엔 latest stable Flash
 
 
 def _get_api_key() -> str:
-    """API 키 조회 — Streamlit Cloud secrets 우선, 로컬 .env 백업"""
+    """API 키 조회 — Streamlit Cloud secrets 우선, 로컬 .env 백업.
+    워커 스레드 대응으로 한 번 읽으면 os.environ 에 캐싱 (dart._get_api_key 와 동일 패턴)."""
+    cached = os.environ.get("GEMINI_API_KEY", "").strip()
+    if cached:
+        return cached
     try:
         import streamlit as st
         if "GEMINI_API_KEY" in st.secrets:
-            return str(st.secrets["GEMINI_API_KEY"]).strip()
-    except (ImportError, FileNotFoundError, AttributeError, Exception):
+            key = str(st.secrets["GEMINI_API_KEY"]).strip()
+            if key:
+                os.environ["GEMINI_API_KEY"] = key
+                return key
+    except Exception:
         pass
     load_dotenv(ENV_PATH, override=True)
     return os.environ.get("GEMINI_API_KEY", "").strip()

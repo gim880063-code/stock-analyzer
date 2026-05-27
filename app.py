@@ -825,7 +825,7 @@ def _progress_update(
 
 
 # 분석 로직이 바뀔 때마다 이 버전을 올려서 기존 캐시를 무효화
-ANALYZER_VERSION = "v27-2026-05-27-dart-corpcode-deployed-noise-reduced"
+ANALYZER_VERSION = "v28-2026-05-27-secrets-worker-thread-cache"
 if st.session_state.get("_analyzer_cache_version") != ANALYZER_VERSION:
     cached_analyze.clear()
     st.session_state["_analyzer_cache_version"] = ANALYZER_VERSION
@@ -1467,6 +1467,14 @@ def render_stock_card(r: dict, favorites: list[str]) -> None:
                     # ETF·SPAC·신규상장 등 단순 미등록은 dart_error=None이라 조용히 패스.
                     lines.append(
                         f"- **재무 데이터** — DART 조회 실패 (`{src['dart_error']}`)"
+                    )
+                elif not src.get("has_dart"):
+                    # DART 미연동 상태 — 가치/재무/성장/공시 점수 모두 안 나옴.
+                    # 사용자가 원인을 모르고 헤매지 않게 명시적으로 노출.
+                    lines.append(
+                        "- **DART 미연동** — 가치/재무 건전성/성장성/공시 점수가 빠집니다. "
+                        "사이드바의 DART 상태를 확인하거나, 워커 스레드 secrets 접근 "
+                        "이슈일 수 있습니다 (메인 스레드는 정상이어도 워커가 못 읽는 경우)."
                     )
                 if src.get("has_dart") and disclosures:
                     lines.append("- **공시 목록·분류** — DART OPEN API · 최근 30일 접수분 (Gemini 분류)")
