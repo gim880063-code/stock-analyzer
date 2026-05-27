@@ -424,11 +424,11 @@ with st.sidebar:
         est_codes = 0
 
     if est_codes > 0:
-        est_pass1_sec = est_codes * 8 / 3
+        est_pass1_sec = est_codes * 4 / 3
         est_min = max(1, round(est_pass1_sec / 60))
         st.caption(
-            f"⏱️ 1차 스크리닝 약 {est_min}분 예상 "
-            f"({est_codes}개 ÷ 3병렬). 통과 종목엔 추가 깊이 분석 자동 실행."
+            f"⏱️ 빠른 1차 스크리닝 약 {est_min}분 예상 "
+            f"({est_codes}개 ÷ 3병렬). 통과 종목엔 선택적으로 깊이 분석 실행."
         )
     else:
         st.caption(
@@ -436,10 +436,18 @@ with st.sidebar:
             "관심 종목 분석은 계속 사용할 수 있고, 종목 발굴은 잠시 후 다시 시도하세요."
         )
 
+    screen_deep = st.checkbox(
+        "통과 종목 정밀 분석까지 실행",
+        value=True,
+        key="screen_deep_analysis",
+        help="끄면 1차 점수로 바로 결과를 보여줘서 훨씬 빠릅니다. 켜면 통과 종목만 공시 본문을 더 깊게 확인합니다.",
+    )
+
     if st.button("🔍 발굴 시작", use_container_width=True, key="run_screen"):
         st.session_state["_screen"] = {
             "universe": universe,
             "min_score": min_score,
+            "deep_screen": screen_deep,
         }
         st.rerun()
 
@@ -1697,7 +1705,7 @@ def _screen_worker(runner: dict, stock_dict_local: dict[str, str]) -> None:
     hist_module.begin_batch()
     try:
         with ThreadPoolExecutor(max_workers=3) as executor:
-            futures = {executor.submit(cached_analyze, c, False, 0): c for c in codes}
+            futures = {executor.submit(cached_analyze, c, True, 0): c for c in codes}
             for future in as_completed(futures):
                 if runner.get("_cancel"):
                     break
@@ -1779,7 +1787,7 @@ def _screen_worker(runner: dict, stock_dict_local: dict[str, str]) -> None:
     runner["excluded_score"] = excluded_score
     runner["pre_deep_count"] = len(results)
 
-    if results:
+    if results and runner.get("deep_screen", True):
         from analyzer import enrich_with_deep_analysis, recompute_score_after_deep
         runner["stage"] = "stage2"
         runner["stage_label"] = "2단계 정밀 분석"
@@ -1869,7 +1877,11 @@ def _screen_worker(runner: dict, stock_dict_local: dict[str, str]) -> None:
 
 
 def _start_screen_runner(
-    universe: str, min_score: int, stock_dict_local: dict[str, str],
+    universe: str,
+    min_score: int,
+    stock_dict_local: dict[str, str],
+    *,
+    deep_screen: bool = True,
 ) -> dict:
     runner: dict = {
         "status": "running",
@@ -1882,6 +1894,7 @@ def _start_screen_runner(
         "errors": 0,
         "universe": universe,
         "min_score": min_score,
+        "deep_screen": deep_screen,
         "results": None,
         "dropped_details": None,
         "excluded_stale": 0,
@@ -2688,7 +2701,10 @@ if screen_req and (
     if _screen_runner is not None:
         _clear_screen_runner()
     _screen_runner = _start_screen_runner(
-        screen_req["universe"], screen_req["min_score"], stock_dict,
+        screen_req["universe"],
+        screen_req["min_score"],
+        stock_dict,
+        deep_screen=screen_req.get("deep_screen", True),
     )
 
 if _screen_runner is not None and _screen_runner.get("status") == "running":
@@ -2716,7 +2732,7 @@ if _screen_runner is not None and _screen_runner.get("status") == "running":
         progress_bar.progress(0)
         status_box.caption(stage_label)
     elif stage == "stage1":
-        st.caption("1단계: 전체 분석 (공시 분류 + 잠정실적 + 뉴스)")
+        st.caption("1단계: 빠른 스크리닝 (가격·수급·재무·룰 기반 공시)")
         _progress_update(
             progress_bar, status_box, completed, total,
             "1단계 스크리닝", f"완료: {current}",
