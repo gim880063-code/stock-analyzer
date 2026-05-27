@@ -8,6 +8,7 @@ import io
 import json
 import os
 import re
+import threading
 import zipfile
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -81,24 +82,48 @@ def _download_corp_codes() -> dict[str, str]:
     return mapping
 
 
+# corp_code 매핑은 한 번 받으면 거의 안 바뀌어서 프로세스 수명 동안 메모리에 캐시.
+# 동시 다운로드 방지용 락 — 스크리닝 첫 실행 시 워커 3개가 동시에 ZIP 받는 것 방지.
+_corp_code_lock = threading.Lock()
+_corp_code_mapping: dict[str, str] | None = None
+
+
 def get_corp_code(stock_code: str) -> str:
-    """6자리 종목코드를 DART 8자리 corp_code로 변환 (캐시 사용)"""
+    """6자리 종목코드를 DART 8자리 corp_code로 변환.
+    메모리 캐시 → 파일 캐시 → DART 다운로드 순. 동시 호출 시 다운로드는 1회만."""
+    global _corp_code_mapping
     _ensure_data_dir()
-    if CORP_CODE_CACHE.exists():
-        try:
-            mapping = json.loads(CORP_CODE_CACHE.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            mapping = {}
-    else:
-        mapping = {}
 
-    if stock_code not in mapping:
-        mapping = _download_corp_codes()
-        CORP_CODE_CACHE.write_text(json.dumps(mapping, ensure_ascii=False), encoding="utf-8")
+    # 1) 메모리 캐시 (lock-free fast path)
+    mapping = _corp_code_mapping
+    if mapping is not None and stock_code in mapping:
+        return mapping[stock_code]
 
-    if stock_code not in mapping:
-        raise DartError(f"DART에 등록된 회사가 아닙니다: {stock_code}")
-    return mapping[stock_code]
+    with _corp_code_lock:
+        # 2) double-check — 다른 스레드가 락 대기 중에 채워놨을 수 있음
+        if _corp_code_mapping is not None and stock_code in _corp_code_mapping:
+            return _corp_code_mapping[stock_code]
+
+        # 3) 메모리 캐시 비어있으면 파일 캐시 먼저
+        if _corp_code_mapping is None:
+            if CORP_CODE_CACHE.exists():
+                try:
+                    _corp_code_mapping = json.loads(CORP_CODE_CACHE.read_text(encoding="utf-8"))
+                except json.JSONDecodeError:
+                    _corp_code_mapping = {}
+            else:
+                _corp_code_mapping = {}
+
+        # 4) 파일에도 없으면 다운로드
+        if stock_code not in _corp_code_mapping:
+            _corp_code_mapping = _download_corp_codes()
+            CORP_CODE_CACHE.write_text(
+                json.dumps(_corp_code_mapping, ensure_ascii=False), encoding="utf-8"
+            )
+
+        if stock_code not in _corp_code_mapping:
+            raise DartError(f"DART에 등록된 회사가 아닙니다: {stock_code}")
+        return _corp_code_mapping[stock_code]
 
 
 def _api_get(path: str, params: dict[str, Any], max_retries: int = 2) -> dict:

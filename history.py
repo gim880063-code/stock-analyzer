@@ -36,6 +36,10 @@ RETENTION_DAYS = 365
 
 _lock = threading.Lock()
 _deferred_buffer: dict[str, list[dict]] | None = None
+# 중첩/동시 batch 호출 시에도 안전하도록 reference count로 관리.
+# begin_batch 가 두 번 호출되면 increment, commit_batch 도 두 번이면 0이 돼 저장.
+# 동시 호출이라도 한쪽 commit이 다른 쪽 데이터를 잃지 않음.
+_batch_depth = 0
 
 
 def _load() -> dict[str, list[dict]]:
@@ -48,27 +52,34 @@ def _save(history: dict[str, list[dict]]) -> None:
 
 
 def begin_batch() -> None:
-    """대량 분석 시작 — 이후 record_snapshot은 메모리 버퍼에만 누적."""
-    global _deferred_buffer
+    """대량 분석 시작 — 이후 record_snapshot은 메모리 버퍼에만 누적.
+    중첩/동시 호출 OK (reference count로 관리)."""
+    global _deferred_buffer, _batch_depth
     with _lock:
-        _deferred_buffer = _load()
+        if _batch_depth == 0:
+            _deferred_buffer = _load()
+        _batch_depth += 1
 
 
 def commit_batch() -> None:
-    """배치 종료 — 누적된 변경 사항을 한 번에 저장."""
-    global _deferred_buffer
+    """배치 종료 — 가장 바깥 commit 시점에만 저장.
+    중첩된 begin_batch의 모든 변경이 보존됨."""
+    global _deferred_buffer, _batch_depth
     with _lock:
-        if _deferred_buffer is not None:
+        if _batch_depth > 0:
+            _batch_depth -= 1
+        if _batch_depth == 0 and _deferred_buffer is not None:
             buf = _deferred_buffer
             _deferred_buffer = None
             _save(buf)
 
 
 def discard_batch() -> None:
-    """배치 취소 — 저장 없이 버퍼만 비움."""
-    global _deferred_buffer
+    """배치 취소 — 저장 없이 버퍼만 비움. depth도 0으로 강제 초기화."""
+    global _deferred_buffer, _batch_depth
     with _lock:
         _deferred_buffer = None
+        _batch_depth = 0
 
 
 def record_snapshot(

@@ -398,7 +398,7 @@ def score_growth(fin: dict) -> ScoreItem | None:
     op = fin.get("operating_income")
     op_prev = fin.get("operating_income_prev")
 
-    if revenue is None or revenue_prev in (None, 0):
+    if revenue is None or revenue_prev in (None, 0) or revenue == 0:
         return None
 
     rev_growth = (revenue / revenue_prev - 1) * 100

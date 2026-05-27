@@ -2310,7 +2310,8 @@ if st.session_state.get("_view_mode") == "screening_history":
             })
             code_order.append(code)
 
-        # 정렬
+        # 정렬 — 모든 옵션이 "큰 값/최근 날짜 먼저" (DESC) 의도라 통일 처리.
+        # 날짜 컬럼은 문자열이라 단순히 -v가 안 먹어서 YYYYMMDD 정수로 변환해 부호 반전.
         def _sort_key(idx_row):
             i, r = idx_row
             v = r.get({
@@ -2322,7 +2323,14 @@ if st.session_state.get("_view_mode") == "screening_history":
             }[sort_key])
             if v in ("-", None):
                 return (1, 0)
-            return (0, -v if isinstance(v, (int, float)) else v)
+            if isinstance(v, (int, float)):
+                return (0, -v)
+            if isinstance(v, str):
+                try:
+                    return (0, -int(v.replace("-", "")))
+                except ValueError:
+                    return (0, v)
+            return (0, v)
 
         indexed = list(enumerate(rows))
         indexed.sort(key=_sort_key)

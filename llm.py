@@ -7,6 +7,7 @@ Gemini API 기반 공시 분석 모듈
 import json
 import os
 import re
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -63,6 +64,8 @@ def _get_client() -> genai.Client:
 class DisclosureCache:
     def __init__(self, path: Path = CACHE_FILE):
         self.path = path
+        # 여러 워커 스레드가 동시에 set()/_save() 호출 시 dict 변경 중 직렬화 보호
+        self._lock = threading.Lock()
         self.data = self._load()
 
     def _load(self) -> dict:
@@ -84,13 +87,20 @@ class DisclosureCache:
         return bool(item and item.get("rationale"))
 
     def set(self, rcept_no: str, analysis: dict) -> None:
-        self.data.setdefault("items", {})[rcept_no] = analysis
-        self._save()
+        with self._lock:
+            self.data.setdefault("items", {})[rcept_no] = analysis
+            self._save_locked()
 
-    def _save(self) -> None:
+    def _save_locked(self) -> None:
+        """_lock 이미 보유한 상태에서만 호출. 외부 호출 금지."""
         self.path.parent.mkdir(exist_ok=True)
+        # json.dumps 도중 다른 스레드가 dict 변경하면 RuntimeError 가능 → 스냅샷 후 직렬화
+        snapshot = {
+            "_version": self.data.get("_version", CACHE_VERSION),
+            "items": dict(self.data.get("items", {})),
+        }
         self.path.write_text(
-            json.dumps(self.data, ensure_ascii=False, indent=2),
+            json.dumps(snapshot, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
 
