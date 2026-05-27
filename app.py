@@ -27,6 +27,44 @@ import scouted
 DEFAULT_WATCHLIST = ["005930", "000660", "035420"]
 
 
+def _stock_option(code: str, stock_dict: dict[str, str]) -> str:
+    """multiselect option label. Unknown codes are still preserved safely."""
+    code = str(code).strip().zfill(6)
+    return f"{code} {stock_dict.get(code, '저장된 종목')}"
+
+
+def build_watchlist_options(
+    stock_dict: dict[str, str],
+    saved_codes: list[str],
+    extra_codes: list[str] | None = None,
+) -> list[str]:
+    """
+    Build sidebar options while preserving saved/custom codes even when KRX
+    listing lookup temporarily fails.
+    """
+    options = [f"{code} {name}" for code, name in sorted(stock_dict.items())]
+    seen = {opt.split(maxsplit=1)[0] for opt in options}
+    for code in [*saved_codes, *(extra_codes or [])]:
+        clean = str(code).strip().zfill(6)
+        if not clean or clean in seen:
+            continue
+        options.append(_stock_option(clean, stock_dict))
+        seen.add(clean)
+    return options
+
+
+def _codes_from_options(items: list[str]) -> list[str]:
+    codes: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        code = str(item).split(maxsplit=1)[0].strip().zfill(6)
+        if not code or code in seen:
+            continue
+        codes.append(code)
+        seen.add(code)
+    return codes
+
+
 def _load_str_list(filename: str) -> list[str]:
     data = cloud_store.load(filename, [])
     if isinstance(data, list) and all(isinstance(x, str) for x in data):
@@ -119,23 +157,28 @@ with st.sidebar:
     st.header("관심 종목")
 
     stock_dict = get_stock_dict()
-    options = [f"{code} {name}" for code, name in sorted(stock_dict.items())]
+    saved_codes = load_watchlist()
 
     # 즐겨찾기 클릭으로 추가 요청된 코드를 multiselect 렌더 전에 주입
     pending_to_add = st.session_state.pop("_pending_add_to_watchlist", [])
+    options = build_watchlist_options(stock_dict, saved_codes, pending_to_add)
+    if "watchlist_select" in st.session_state:
+        current_codes = _codes_from_options(st.session_state["watchlist_select"])
+        options = build_watchlist_options(stock_dict, saved_codes, [*pending_to_add, *current_codes])
+        st.session_state["watchlist_select"] = [
+            _stock_option(c, stock_dict) for c in current_codes
+        ]
     if pending_to_add:
         current = st.session_state.get("watchlist_select")
         if current is None:
-            saved = load_watchlist()
-            current = [f"{c} {stock_dict.get(c, '?')}" for c in saved if c in stock_dict]
+            current = [_stock_option(c, stock_dict) for c in saved_codes]
         for c in pending_to_add:
-            opt = f"{c} {stock_dict.get(c, '?')}"
+            opt = _stock_option(c, stock_dict)
             if opt in options and opt not in current:
                 current = current + [opt]
         st.session_state["watchlist_select"] = current
 
-    saved_codes = load_watchlist()
-    default_options = [f"{c} {stock_dict.get(c, '?')}" for c in saved_codes if c in stock_dict]
+    default_options = [_stock_option(c, stock_dict) for c in saved_codes]
 
     multiselect_kwargs = {
         "options": options,

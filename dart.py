@@ -21,6 +21,14 @@ from dotenv import load_dotenv
 
 ENV_PATH = Path(__file__).parent / ".env"
 DATA_DIR = Path(__file__).parent / "data"
+PLACEHOLDER_MARKERS = (
+    "여기에",
+    "붙여넣",
+    "your_",
+    "api_키",
+    "api 키",
+    "xxxxxxxx",
+)
 
 
 def _get_api_key() -> str:
@@ -32,21 +40,31 @@ def _get_api_key() -> str:
     """
     # 1) 이미 env에 있으면 그대로 사용 (워커 스레드 fast path + secrets fallback)
     cached = os.environ.get("DART_API_KEY", "").strip()
-    if cached:
+    if _is_real_api_key(cached):
         return cached
     # 2) Streamlit secrets (배포 환경, 보통 메인 스레드)
     try:
         import streamlit as st
         if "DART_API_KEY" in st.secrets:
             key = str(st.secrets["DART_API_KEY"]).strip()
-            if key:
+            if _is_real_api_key(key):
                 os.environ["DART_API_KEY"] = key  # 워커 스레드용 캐시
                 return key
     except Exception:
         pass
     # 3) 로컬 .env (개발 환경)
     load_dotenv(ENV_PATH, override=True)
-    return os.environ.get("DART_API_KEY", "").strip()
+    key = os.environ.get("DART_API_KEY", "").strip()
+    return key if _is_real_api_key(key) else ""
+
+
+def _is_real_api_key(key: str) -> bool:
+    if not key:
+        return False
+    low = key.lower()
+    return not any(marker in low for marker in PLACEHOLDER_MARKERS)
+
+
 CORP_CODE_CACHE = DATA_DIR / "corp_codes.json"
 
 BASE_URL = "https://opendart.fss.or.kr/api"
@@ -204,6 +222,16 @@ def _latest_report_codes() -> list[tuple[int, str]]:
     return candidates
 
 
+def _income_annualization_factor(reprt_code: str) -> float:
+    """Convert period income to an annualized figure for PER/ROE only."""
+    return {
+        "11013": 4.0,       # 1Q
+        "11012": 2.0,       # half-year
+        "11014": 4.0 / 3.0, # 3Q cumulative
+        "11011": 1.0,       # annual
+    }.get(reprt_code, 1.0)
+
+
 def _fetch_acnt_all(corp_code: str, year: int, reprt_code: str) -> list[dict]:
     """단일회사 전체 재무제표"""
     try:
@@ -241,20 +269,40 @@ def _to_int(v) -> int | None:
         return None
 
 
-def _find_amount(rows: list[dict], account_names: list[str], current: bool = True) -> int | None:
+def _amount_from_fields(row: dict, fields: list[str]) -> int | None:
+    for field in fields:
+        amt = _to_int(row.get(field))
+        if amt is not None:
+            return amt
+    return None
+
+
+def _find_amount(
+    rows: list[dict],
+    account_names: list[str],
+    current: bool = True,
+    cumulative: bool = False,
+) -> int | None:
     """
     재무제표 행에서 계정과목의 금액 찾기.
     1단계: 정확 일치 (예: "매출액" == "매출액")
     2단계: 부분 일치 fallback (예: "영업수익" in "기타영업수익")
     이렇게 안 하면 "기타영업수익" 같은 부수 항목이 "매출액"보다 먼저 매칭됨.
     """
-    field = "thstrm_amount" if current else "frmtrm_amount"
+    if cumulative:
+        fields = (
+            ["thstrm_add_amount", "thstrm_amount"]
+            if current else
+            ["frmtrm_add_amount", "frmtrm_amount"]
+        )
+    else:
+        fields = ["thstrm_amount"] if current else ["frmtrm_amount"]
 
     for target in account_names:
         for row in rows:
             nm = (row.get("account_nm") or "").strip()
             if nm == target:
-                amt = _to_int(row.get(field))
+                amt = _amount_from_fields(row, fields)
                 if amt is not None:
                     return amt
 
@@ -262,7 +310,7 @@ def _find_amount(rows: list[dict], account_names: list[str], current: bool = Tru
         for row in rows:
             nm = (row.get("account_nm") or "").strip()
             if target in nm:
-                amt = _to_int(row.get(field))
+                amt = _amount_from_fields(row, fields)
                 if amt is not None:
                     return amt
 
@@ -276,7 +324,10 @@ def get_financials(stock_code: str) -> dict:
     """
     result: dict[str, Any] = {
         "report_label": None,    # 예: "2024 사업보고서"
+        "report_code": None,
+        "annualization_factor": 1.0,
         "net_income": None,
+        "net_income_annualized": None,
         "equity": None,
         "debt": None,
         "revenue": None,
@@ -304,6 +355,8 @@ def get_financials(stock_code: str) -> dict:
 
     label_map = {"11011": "사업보고서", "11013": "1분기보고서", "11012": "반기보고서", "11014": "3분기보고서"}
     result["report_label"] = f"{chosen[0]} {label_map.get(chosen[1], chosen[1])}"
+    result["report_code"] = chosen[1]
+    result["annualization_factor"] = _income_annualization_factor(chosen[1])
 
     # 재무상태표 (BS) — 자본총계, 부채총계
     bs_rows = [r for r in rows if r.get("sj_div") == "BS"]
@@ -325,15 +378,19 @@ def get_financials(stock_code: str) -> dict:
     result["debt"] = _find_amount(bs_rows, DEBT_NAMES)
 
     # 손익계산서 — 매출, 영업이익, 당기순이익 (당기/전기)
-    result["revenue"] = _find_amount(is_rows, REVENUE_NAMES, current=True)
-    result["revenue_prev"] = _find_amount(is_rows, REVENUE_NAMES, current=False)
-    result["operating_income"] = _find_amount(is_rows, OP_NAMES, current=True)
-    result["operating_income_prev"] = _find_amount(is_rows, OP_NAMES, current=False)
-    result["net_income"] = _find_amount(is_rows, NI_NAMES, current=True)
+    result["revenue"] = _find_amount(is_rows, REVENUE_NAMES, current=True, cumulative=True)
+    result["revenue_prev"] = _find_amount(is_rows, REVENUE_NAMES, current=False, cumulative=True)
+    result["operating_income"] = _find_amount(is_rows, OP_NAMES, current=True, cumulative=True)
+    result["operating_income_prev"] = _find_amount(is_rows, OP_NAMES, current=False, cumulative=True)
+    result["net_income"] = _find_amount(is_rows, NI_NAMES, current=True, cumulative=True)
+    if result["net_income"] is not None:
+        result["net_income_annualized"] = int(round(
+            result["net_income"] * result["annualization_factor"]
+        ))
 
     # 비율 계산
-    if result["net_income"] is not None and result["equity"]:
-        result["roe"] = round(result["net_income"] / result["equity"] * 100, 2)
+    if result["net_income_annualized"] is not None and result["equity"]:
+        result["roe"] = round(result["net_income_annualized"] / result["equity"] * 100, 2)
     if result["debt"] is not None and result["equity"]:
         result["debt_ratio"] = round(result["debt"] / result["equity"] * 100, 2)
     if result["revenue"] is not None and result["revenue_prev"]:
@@ -532,8 +589,12 @@ def calc_per_pbr(stock_code: str, current_price: float, shares: int, fin: dict) 
     if not shares or shares <= 0:
         return out
 
-    if fin.get("net_income") is not None:
-        eps = fin["net_income"] / shares
+    income_for_per = fin.get("net_income_annualized")
+    if income_for_per is None:
+        income_for_per = fin.get("net_income")
+
+    if income_for_per is not None:
+        eps = income_for_per / shares
         out["eps"] = round(eps, 2)
         if eps > 0:
             out["per"] = round(current_price / eps, 2)

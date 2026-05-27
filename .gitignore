@@ -28,3 +28,5 @@ Thumbs.db
 # 임시 디버그 스크립트
 test_*.py
 scratch_*.py
+!tests/
+!tests/test_*.py

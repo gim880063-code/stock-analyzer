@@ -112,6 +112,14 @@ def _invalidate_cache():
         _gist_cache = None
 
 
+def _remember_cached_file(filename: str, content: str) -> None:
+    """Keep current-session reads consistent when a later Gist PATCH fails."""
+    global _gist_cache
+    with _lock:
+        if _gist_cache is not None:
+            _gist_cache = {**_gist_cache, filename: content}
+
+
 def load(filename: str, default: Any) -> Any:
     """
     JSON 파일 로드. Gist 우선, 실패 시 로컬, 그것도 없으면 default.
@@ -146,6 +154,7 @@ def save(filename: str, data: Any) -> None:
     try:
         DATA_DIR.mkdir(exist_ok=True)
         (DATA_DIR / filename).write_text(content, encoding="utf-8")
+        _remember_cached_file(filename, content)
     except OSError:
         pass
 
@@ -169,5 +178,7 @@ def save(filename: str, data: Any) -> None:
             _invalidate_cache()
         else:
             _log(f"❌ {filename} HTTP {r.status_code}: {r.text[:150]}")
+            _remember_cached_file(filename, content)
     except Exception as e:
         _log(f"❌ {filename} 예외 {type(e).__name__}: {str(e)[:150]}")
+        _remember_cached_file(filename, content)

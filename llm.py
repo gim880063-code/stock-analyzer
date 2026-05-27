@@ -22,6 +22,14 @@ ENV_PATH = Path(__file__).parent / ".env"
 DATA_DIR = Path(__file__).parent / "data"
 CACHE_FILE = DATA_DIR / "llm_disclosure_cache.json"
 CACHE_VERSION = "v1"
+PLACEHOLDER_MARKERS = (
+    "여기에",
+    "붙여넣",
+    "your_",
+    "api_키",
+    "api 키",
+    "xxxxxxxx",
+)
 
 # Gemini -latest aliases: 자동으로 최신 stable Flash 모델로 라우팅.
 # 2.5 Flash/Pro/Flash-Lite는 무료 한도가 일 20~0회로 매우 빡빡함 (확인됨).
@@ -34,19 +42,27 @@ def _get_api_key() -> str:
     """API 키 조회 — Streamlit Cloud secrets 우선, 로컬 .env 백업.
     워커 스레드 대응으로 한 번 읽으면 os.environ 에 캐싱 (dart._get_api_key 와 동일 패턴)."""
     cached = os.environ.get("GEMINI_API_KEY", "").strip()
-    if cached:
+    if _is_real_api_key(cached):
         return cached
     try:
         import streamlit as st
         if "GEMINI_API_KEY" in st.secrets:
             key = str(st.secrets["GEMINI_API_KEY"]).strip()
-            if key:
+            if _is_real_api_key(key):
                 os.environ["GEMINI_API_KEY"] = key
                 return key
     except Exception:
         pass
     load_dotenv(ENV_PATH, override=True)
-    return os.environ.get("GEMINI_API_KEY", "").strip()
+    key = os.environ.get("GEMINI_API_KEY", "").strip()
+    return key if _is_real_api_key(key) else ""
+
+
+def _is_real_api_key(key: str) -> bool:
+    if not key:
+        return False
+    low = key.lower()
+    return not any(marker in low for marker in PLACEHOLDER_MARKERS)
 
 
 def is_configured() -> bool:
@@ -113,12 +129,15 @@ class DisclosureCache:
 
 
 _cache: DisclosureCache | None = None
+_cache_init_lock = threading.Lock()
 
 
 def get_cache() -> DisclosureCache:
     global _cache
     if _cache is None:
-        _cache = DisclosureCache()
+        with _cache_init_lock:
+            if _cache is None:
+                _cache = DisclosureCache()
     return _cache
 
 
