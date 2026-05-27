@@ -19,7 +19,7 @@
 from collections import defaultdict
 from statistics import mean
 
-from analyzer import SHORT_TERM_ITEMS, MID_TERM_ITEMS
+from analyzer import SHORT_TERM_ITEMS, MID_TERM_ITEMS, weighted_score
 import history
 import scouted
 
@@ -40,7 +40,12 @@ def _extract_score(info: dict, score_type: str) -> int | None:
         items = MID_TERM_ITEMS
     else:
         return None
-    return sum(int(v) for k, v in added_scores.items() if k in items)
+    score_items = [
+        {"name": k, "score": int(v), "max": 1}
+        for k, v in added_scores.items()
+        if k in items
+    ]
+    return weighted_score(score_items, items)[0]
 
 
 # 점수 구간 — 종합/단기/중기 점수는 max 값이 달라서 bucket도 다르게.
@@ -93,7 +98,12 @@ def _extract_score_from_entry(entry: dict, score_type: str) -> int | None:
         items = MID_TERM_ITEMS
     else:
         return None
-    return sum(int(v) for k, v in scores.items() if k in items)
+    score_items = [
+        {"name": k, "score": int(v), "max": 1}
+        for k, v in scores.items()
+        if k in items
+    ]
+    return weighted_score(score_items, items)[0]
 
 
 def _bucket_stats(rows: list[dict], value_key: str, score_key: str, score_type: str = "total") -> dict:

@@ -415,7 +415,7 @@ with st.sidebar:
         help="🛡️ 안전 유니버스 = 시총 5조+ / 거래대금 500억+ / 관리종목 등 제외 — 작전주 위험 낮은 후보들",
     )
 
-    min_score = st.slider("최소 종합점수", -10, 10, 0, 1, key="screen_min_score")
+    min_score = st.slider("최소 종합점수", -15, 15, 4, 1, key="screen_min_score")
 
     # 시간 추정 — KRX 종목 목록 서버가 불안정해도 앱 전체가 멈추지 않도록 보호
     try:
@@ -883,11 +883,11 @@ def score_color(score: int) -> str:
 
 
 def opinion_emoji(total: int) -> str:
-    if total >= 2:
+    if total >= 8:
         return "✨"
-    if total >= 0:
+    if total >= 4:
         return "🟡"
-    if total >= -2:
+    if total >= -1:
         return "👀"
     return "⚠️"
 
@@ -1247,7 +1247,7 @@ def render_stock_card(r: dict, favorites: list[str]) -> None:
         mt_max = r.get("mid_term_max", 0)
         m2.caption(
             f"단기 **{st_score:+d}**/{st_max} · 중기 **{mt_score:+d}**/{mt_max}  \n"
-            f":gray[1~4주 매매엔 단기 / 분기 보유엔 중기 점수 참고]"
+            f":gray[종합점수는 가격 반응 신호(상대강도·수급·거래량·공시)에 가중치 적용]"
         )
         m3.metric("의견", f"{opinion_emoji(r['total'])} {r['opinion'].split(' — ')[0]}")
 
@@ -2515,14 +2515,14 @@ if st.session_state.get("_view_mode") == "verifier":
             "점수 종류 비교 — 어느 점수가 실제 수익률을 가장 잘 예측했는지",
             options=["total", "short_term", "mid_term"],
             format_func=lambda t: {
-                "total": "종합 점수 (모든 항목 합)",
-                "short_term": "단기 점수 (거래량·수급·공시·시장강도)",
-                "mid_term": "중기 점수 (추세·가치·재무·성장성)",
+                "total": "종합 점수 (매매 가중치 적용)",
+                "short_term": "단기 점수 (가중: 거래량·수급·공시·시장강도)",
+                "mid_term": "중기 점수 (가중: 추세·가치·재무·성장성)",
             }[t],
             horizontal=True,
             key="sim_score_type",
             help=(
-                "단기 점수는 1~4주 매매에 효과가 학술적으로 검증된 항목만 합산. "
+                "단기 점수는 1~4주 매매에 중요도가 높은 항목을 가중 합산. "
                 "중기 점수는 분기 이상에서 효과가 있는 항목만 합산. "
                 "모멘텀(RSI)과 가격리스크는 의심 항목이라 종합점수에만 포함되고 부분합엔 빠짐."
             ),

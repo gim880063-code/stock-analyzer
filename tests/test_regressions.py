@@ -6,10 +6,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import pandas as pd
+
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+import analyzer  # noqa: E402
 import cloud_store  # noqa: E402
 import dart  # noqa: E402
 import llm  # noqa: E402
@@ -82,6 +85,28 @@ class LlmTests(unittest.TestCase):
             patch.object(llm, "load_dotenv", return_value=False),
         ):
             self.assertFalse(llm.is_configured())
+
+
+class ScoringTests(unittest.TestCase):
+    def test_weighted_score_prioritizes_price_reaction_items(self):
+        scores = [
+            {"name": "시장 상대강도", "score": 1, "max": 1},
+            {"name": "수급", "score": 1, "max": 1},
+            {"name": "가치", "score": 1, "max": 1},
+        ]
+        total, max_possible = analyzer.weighted_score(scores)
+        self.assertEqual(total, 5)
+        self.assertEqual(max_possible, 5)
+
+    def test_oversold_rsi_is_not_counted_as_buy_signal_by_itself(self):
+        df = pd.DataFrame({"Close": list(range(100, 60, -1))})
+        item = analyzer.score_momentum(df)
+        self.assertLessEqual(item["score"], 0)
+        self.assertIn("과매도", item["msg"])
+
+    def test_opinion_thresholds_are_trading_oriented(self):
+        self.assertTrue(analyzer.overall_opinion(8, 15).startswith("매수 우위"))
+        self.assertTrue(analyzer.overall_opinion(-5, 15).startswith("매도"))
 
 
 if __name__ == "__main__":

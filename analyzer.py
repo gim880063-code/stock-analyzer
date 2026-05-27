@@ -58,6 +58,40 @@ UNIVERSE_LABELS = {
 SHORT_TERM_ITEMS = {"거래량", "수급", "공시", "시장 상대강도"}
 MID_TERM_ITEMS = {"추세", "가치", "재무 건전성", "성장성"}
 
+# 매수/매도 판단에 쓰는 종합점수는 단순 합산보다 가격 반응 가능성이 큰 항목에
+# 더 높은 가중치를 둔다. 실제 예측력은 앱의 점수 시뮬레이션으로 계속 검증한다.
+SCORE_WEIGHTS: dict[str, int] = {
+    "시장 상대강도": 2,
+    "수급": 2,
+    "거래량": 2,
+    "공시": 2,
+    "추세": 1,
+    "모멘텀": 1,
+    "가격 리스크": 1,
+    "가치": 1,
+    "재무 건전성": 1,
+    "성장성": 1,
+}
+
+
+def weighted_score(
+    scores: list[dict],
+    item_names: set[str] | None = None,
+) -> tuple[int, int]:
+    """Return weighted score and weighted positive max for the selected items."""
+    total = 0
+    max_possible = 0
+    for item in scores:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name")
+        if item_names is not None and name not in item_names:
+            continue
+        weight = SCORE_WEIGHTS.get(str(name), 1)
+        total += int(item.get("score", 0)) * weight
+        max_possible += max(0, int(item.get("max", 0))) * weight
+    return total, max_possible
+
 
 # 작전주·관리종목 위험 분류는 자동 제외 (KOSDAQ 우량/중견/기술성장은 정상)
 EXCLUDED_DEPTS = {
@@ -158,7 +192,7 @@ class AnalysisResult(TypedDict):
     last_close: float
     change_pct: float
     scores: list[ScoreItem]
-    total: int
+    total: int  # 매매 목적 가중 종합점수
     # 단기·중기 부분합 — 시간 축이 맞는 항목만 집계 (SHORT_TERM_ITEMS / MID_TERM_ITEMS)
     short_term_score: int
     short_term_max: int
@@ -210,16 +244,20 @@ def score_trend(df: pd.DataFrame) -> ScoreItem:
 
 def score_momentum(df: pd.DataFrame) -> ScoreItem:
     rsi = calc_rsi(df["Close"])
-    if rsi >= 70:
-        score, msg = -1, f"RSI {rsi:.0f}, 단기 과열 주의"
-    elif rsi <= 30:
-        score, msg = 1, f"RSI {rsi:.0f}, 단기 과매도 반등 가능"
-    elif 50 < rsi < 70:
+    if pd.isna(rsi):
+        score, msg = 0, "RSI 산출 불가, 모멘텀 중립"
+    elif rsi >= 80:
+        score, msg = -1, f"RSI {rsi:.0f}, 극단 과열로 단기 되돌림 주의"
+    elif rsi >= 70:
+        score, msg = 0, f"RSI {rsi:.0f}, 강하지만 과열권"
+    elif 55 <= rsi < 70:
         score, msg = 1, f"RSI {rsi:.0f}, 상승 모멘텀 유효"
-    elif 30 < rsi < 50:
-        score, msg = 0, f"RSI {rsi:.0f}, 모멘텀 약화"
-    else:
+    elif 45 <= rsi < 55:
         score, msg = 0, f"RSI {rsi:.0f}, 중립"
+    elif 30 <= rsi < 45:
+        score, msg = -1, f"RSI {rsi:.0f}, 하락 모멘텀 우세"
+    else:
+        score, msg = -1, f"RSI {rsi:.0f}, 과매도지만 추세 확인 전 매수 신호 제외"
     return {"name": "모멘텀", "score": score, "msg": msg, "max": 1}
 
 
@@ -666,24 +704,17 @@ def recompute_score_after_deep(result: dict) -> None:
     if not replaced:
         scores.append(new_item)
 
-    total = sum(s.get("score", 0) for s in scores)
-    max_possible = sum(s.get("max", 0) for s in scores)
+    total, max_possible = weighted_score(scores)
     result["total"] = total
     result["opinion"] = overall_opinion(total, max_possible)
 
     # 공시 점수 변경에 따라 단기 부분합도 재계산 (공시는 SHORT_TERM_ITEMS 소속)
-    result["short_term_score"] = sum(
-        s.get("score", 0) for s in scores if s.get("name") in SHORT_TERM_ITEMS
-    )
-    result["short_term_max"] = sum(
-        s.get("max", 0) for s in scores if s.get("name") in SHORT_TERM_ITEMS
-    )
-    result["mid_term_score"] = sum(
-        s.get("score", 0) for s in scores if s.get("name") in MID_TERM_ITEMS
-    )
-    result["mid_term_max"] = sum(
-        s.get("max", 0) for s in scores if s.get("name") in MID_TERM_ITEMS
-    )
+    short_term_score, short_term_max = weighted_score(scores, SHORT_TERM_ITEMS)
+    mid_term_score, mid_term_max = weighted_score(scores, MID_TERM_ITEMS)
+    result["short_term_score"] = short_term_score
+    result["short_term_max"] = short_term_max
+    result["mid_term_score"] = mid_term_score
+    result["mid_term_max"] = mid_term_max
 
     # 깊이 분석으로 점수가 바뀌었을 수 있으니 history 스냅샷도 새 값으로 덮어씀
     # → 검증 도구가 "사용자에게 실제로 보여진 점수" 기준으로 수익률 계산하게 됨
@@ -833,17 +864,17 @@ def analyze_and_score_disclosures(
 
 
 def overall_opinion(total: int, max_possible: int) -> str:
-    """max_possible(가능한 양의 점수 합) 대비 비율로 의견 결정"""
+    """매매 목적 점수: 강한 매수/분할매수/관망/매도 검토로 표현."""
     ratio = total / max_possible if max_possible > 0 else 0
-    if ratio >= 0.5:
-        return "관심 유지 — 다수 지표가 우호적입니다."
-    if ratio >= 0.2:
-        return "분할 접근 가능 — 일부 위험 요인이 있어 한 번에 매수하기보다 나눠서 접근하세요."
-    if ratio >= 0:
-        return "중립 — 긍정·부정 신호가 비슷해 추가 확인이 필요합니다."
-    if ratio >= -0.3:
-        return "관망 — 위험 요인이 많아 진입 시점을 미루는 것이 안전합니다."
-    return "리스크 확대 — 다수 지표가 부정적이므로 신규 진입은 신중해야 합니다."
+    if total >= 8 and ratio >= 0.5:
+        return "매수 우위 — 가격 반응 신호와 중기 요인이 함께 우호적입니다."
+    if total >= 4 and ratio >= 0.25:
+        return "분할 매수 후보 — 긍정 신호가 우세하지만 추격 매수는 나눠서 접근하세요."
+    if total <= -5 or ratio <= -0.3:
+        return "매도·비중축소 검토 — 부정 신호가 우세해 보유 리스크 점검이 필요합니다."
+    if total <= -1:
+        return "신규 매수 보류 — 하락·리스크 신호가 남아 있습니다."
+    return "중립 관망 — 매수·매도 근거가 충분히 갈리지 않았습니다."
 
 
 def _resolve_name(code: str) -> str:
@@ -1134,14 +1165,11 @@ def analyze(code: str, lite: bool = False, deep_top: int = 3) -> AnalysisResult:
                 scores.append(prelim_growth)
                 preliminary_used_for_growth = True
 
-    total = sum(s["score"] for s in scores)
-    max_possible = sum(s["max"] for s in scores)
+    total, max_possible = weighted_score(scores)
 
     # 단기·중기 부분합 — 시간 축이 맞는 항목만 합산
-    short_term_score = sum(s["score"] for s in scores if s["name"] in SHORT_TERM_ITEMS)
-    short_term_max = sum(s["max"] for s in scores if s["name"] in SHORT_TERM_ITEMS)
-    mid_term_score = sum(s["score"] for s in scores if s["name"] in MID_TERM_ITEMS)
-    mid_term_max = sum(s["max"] for s in scores if s["name"] in MID_TERM_ITEMS)
+    short_term_score, short_term_max = weighted_score(scores, SHORT_TERM_ITEMS)
+    mid_term_score, mid_term_max = weighted_score(scores, MID_TERM_ITEMS)
 
     # 뉴스 (참고용, 점수 영향 없음 — lite 모드는 생략)
     news_items: list[dict] = []
