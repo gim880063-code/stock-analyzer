@@ -545,28 +545,65 @@ def score_market_relative(df: pd.DataFrame, code: str) -> ScoreItem | None:
 
 def score_risk(df: pd.DataFrame) -> ScoreItem:
     close = df["Close"]
-    ret5 = (close.iloc[-1] / close.iloc[-6] - 1) * 100
+    vol = df["Volume"]
+    ret1 = (close.iloc[-1] / close.iloc[-2] - 1) * 100 if len(close) >= 2 else 0
+    ret3 = (close.iloc[-1] / close.iloc[-4] - 1) * 100 if len(close) >= 4 else 0
+    ret5 = (close.iloc[-1] / close.iloc[-6] - 1) * 100 if len(close) >= 6 else 0
     high20 = close.tail(20).max()
     drawdown = (close.iloc[-1] / high20 - 1) * 100
     high52w = close.tail(252).max() if len(close) >= 252 else close.max()
     proximity = close.iloc[-1] / high52w * 100  # 100 = 52주 고점
     rsi = calc_rsi(close)
 
+    # 거래량 동반 여부 — 급등에 거래량이 안 붙으면 컨빅션 약함
+    avg20_vol = vol.tail(20).mean() if len(vol) >= 20 else vol.mean()
+    today_vol = vol.iloc[-1]
+    vol_ratio = (today_vol / avg20_vol) if avg20_vol else 1.0
+
     flags: list[str] = []
     score = 0
+    surge_flagged = False  # 거래량 가중 페널티 트리거 여부
 
-    if ret5 >= 15:
+    # 5일 누적 — 강도별 차등 (15~25% / 25~40% / 40%+)
+    if ret5 >= 40:
+        score -= 3
+        flags.append(f"5일 +{ret5:.1f}% 극단 급등")
+        surge_flagged = True
+    elif ret5 >= 25:
+        score -= 2
+        flags.append(f"5일 +{ret5:.1f}% 강한 급등")
+        surge_flagged = True
+    elif ret5 >= 15:
         score -= 2
         flags.append(f"5일 +{ret5:.1f}% 급등")
+        surge_flagged = True
     elif ret5 >= 8:
         score -= 1
         flags.append(f"5일 +{ret5:.1f}% 단기 상승폭 확대")
+        surge_flagged = True
+
+    # 3일 누적 — 5일 임계 미달이라도 3일에 응축된 상승 잡기
+    if ret3 >= 10 and ret5 < 15:
+        score -= 1
+        flags.append(f"3일 +{ret3:.1f}% 단기 응축 상승")
+        surge_flagged = True
+
+    # 1일 큰 양봉 — 직전 하루에 큰 폭으로 튄 경우
+    if ret1 >= 5:
+        score -= 1
+        flags.append(f"전일 +{ret1:.1f}% 큰 양봉")
+        surge_flagged = True
+
+    # 거래량 미동반 가중 페널티 — 급등이 있는데 거래량이 평균 80% 미만이면 약한 컨빅션
+    if surge_flagged and vol_ratio < 0.8:
+        score -= 1
+        flags.append(f"거래량 {vol_ratio:.2f}배 — 급등에 거래량 미동반")
 
     if rsi >= 80:
         score -= 1
         flags.append(f"RSI {rsi:.0f} 극단적 과열")
 
-    if proximity >= 97:
+    if proximity >= 95:
         score -= 1
         flags.append(f"52주 고점 {proximity:.1f}% 근접")
 
@@ -574,7 +611,12 @@ def score_risk(df: pd.DataFrame) -> ScoreItem:
         score -= 1
         flags.append(f"20일 고점 대비 {drawdown:.1f}% 조정")
 
-    score = max(-2, score)  # max 항목값(0) 안에서 -2까지
+    # 다중 과열 신호 결합 가산 — 급등 + RSI 극단 + 52w 고점이 동시면 위험 가중
+    if surge_flagged and rsi >= 80 and proximity >= 95:
+        score -= 1
+        flags.append("3중 과열 결합")
+
+    score = max(-3, score)  # max 항목값(0) 안에서 -3까지
 
     if not flags:
         msg = f"단기 변동성 양호 (5일 {ret5:+.1f}%, RSI {rsi:.0f}, 52주 고점 대비 {proximity:.0f}%)"
@@ -861,6 +903,64 @@ def _compute_recent_surge(df) -> dict:
     }
 
 
+# 펀더멘털 backed-out 급등 — 단기 급등에도 적자/이익 악화가 동반되면 자동 제외.
+# 펀더멘털 없는 급등은 평균 회귀 위험이 더 큼 (memory: 보수적 점수 철학).
+_FUNDAMENTAL_SURGE_RET5_MIN = 12.0
+_FUNDAMENTAL_SURGE_OP_DECLINE_PCT = -30.0
+
+
+def _check_fundamental_backed_surge(
+    df, recent_surge: dict, fin: dict | None, preliminary: dict | None,
+) -> dict:
+    """기존 recent_surge에 펀더멘털 backed-out 트리거 추가.
+
+    - 5일 +12% 이상 상승 + (영업적자 or 영업이익 30%+ 악화) → is_surge=True
+    - 잠정실적 우선, 없으면 정기 재무 사용.
+    """
+    if df is None or len(df) < 6:
+        return recent_surge
+
+    close = df["Close"]
+    past5 = float(close.iloc[-6])
+    if past5 <= 0:
+        return recent_surge
+    ret5 = (float(close.iloc[-1]) / past5 - 1) * 100
+    if ret5 < _FUNDAMENTAL_SURGE_RET5_MIN:
+        return recent_surge
+
+    op = None
+    op_prev = None
+    label = None
+    if preliminary:
+        op = preliminary.get("operating_income")
+        op_prev = preliminary.get("operating_income_yoy")
+        label = preliminary.get("period_label") or "잠정실적"
+    elif fin:
+        op = fin.get("operating_income")
+        op_prev = fin.get("operating_income_prev")
+        label = fin.get("report_label") or "정기 재무"
+
+    if op is None:
+        return recent_surge
+
+    trigger = None
+    if op < 0:
+        trigger = f"{label} 영업적자 + 5일 +{ret5:.1f}% 급등"
+    elif op_prev is not None and op_prev > 0:
+        decline = (op / op_prev - 1) * 100
+        if decline <= _FUNDAMENTAL_SURGE_OP_DECLINE_PCT:
+            trigger = f"{label} 영업이익 {decline:.0f}% 악화 + 5일 +{ret5:.1f}% 급등"
+
+    if not trigger:
+        return recent_surge
+
+    updated = dict(recent_surge)
+    updated["is_surge"] = True
+    updated["triggers"] = list(recent_surge.get("triggers", [])) + [trigger]
+    updated["fundamental_backed_out"] = True
+    return updated
+
+
 def analyze(code: str, lite: bool = False, deep_top: int = 3) -> AnalysisResult:
     """
     종목 분석.
@@ -913,6 +1013,7 @@ def analyze(code: str, lite: bool = False, deep_top: int = 3) -> AnalysisResult:
 
     flow_last_date: str | None = None
     fin_report_label: str | None = None
+    fin: dict | None = None  # 펀더멘털 backed-out 급등 체크용으로 외부 노출
 
     # 외국인/기관 수급 (네이버 금융 스크래핑)
     try:
@@ -1085,7 +1186,9 @@ def analyze(code: str, lite: bool = False, deep_top: int = 3) -> AnalysisResult:
         "disclosures": disclosures,
         "news": news_items,
         "preliminary": preliminary,
-        "recent_surge": _compute_recent_surge(df),
+        "recent_surge": _check_fundamental_backed_surge(
+            df, _compute_recent_surge(df), fin, preliminary,
+        ),
         "sources": sources,
     }
 
