@@ -16,6 +16,9 @@ data/*
 # 다운로드 실패하면 가치/재무/성장/공시 점수가 전부 None이 되는 치명적 의존성이라
 # 예외적으로 git에 포함 (~87KB, 변경 빈도 낮음).
 !data/corp_codes.json
+# DART 재무 캐시도 부트스트랩 — Streamlit Cloud → DART 네트워크가 막혔을 때
+# Gist 캐시 채워질 때까지 옛 데이터로라도 점수 계산 가능하게.
+!data/dart_financials_cache.json
 
 # OS
 .DS_Store

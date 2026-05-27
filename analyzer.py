@@ -1224,8 +1224,21 @@ def analyze(code: str, lite: bool = False, deep_top: int = 3) -> AnalysisResult:
     # ETF/SPAC 처럼 corp_code 자체가 없는 경우는 영구적이라 조용히 무시.
     if dart.is_configured():
         try:
-            fin = dart.get_financials(code)
+            # Gist 캐시 우선 — DART 직접 호출 실패 시 옛 캐시 fallback.
+            # Streamlit Cloud → DART 네트워크가 자주 막혀서 매번 새로 호출하면
+            # 점수가 None으로 떨어짐. 6시간 TTL 안이면 캐시 그대로 사용.
+            fin = dart.get_financials_cached(code)
             fin_report_label = fin.get("report_label")
+            # report_label=None 인데 _fetch_acnt_all 에서 진짜 API 오류가 있었다면
+            # 그걸 dart_error 로 노출 (이전엔 조용히 무시돼 사용자가 원인을 못 알아냈음)
+            if fin_report_label is None:
+                api_err = dart._get_last_acnt_error()
+                if api_err:
+                    dart_error = api_err
+            # 캐시 fallback (stale) 사용 시 안내 메시지 (오류는 아니지만 사용자가 알아야 함)
+            if fin.get("_cache_stale"):
+                fetched = fin.get("_cache_fetched_at", "?")
+                dart_error = f"DART 일시 오류 — 캐시 사용 (저장 시점: {fetched})"
             shares = get_shares_outstanding(code)
             ratios = dart.calc_per_pbr(code, last_close, shares or 0, fin) if shares else {"per": None, "pbr": None}
 
@@ -1340,6 +1353,9 @@ def analyze(code: str, lite: bool = False, deep_top: int = 3) -> AnalysisResult:
         "flow_last_date": flow_last_date,
         "fin_report_label": fin_report_label,
         "fin_freshness": fin_freshness,
+        "fin_cached": bool(fin and fin.get("_cached")) if fin else False,
+        "fin_cache_fetched_at": fin.get("_cache_fetched_at") if fin else None,
+        "fin_cache_stale": bool(fin and fin.get("_cache_stale")) if fin else False,
         "has_dart": dart.is_configured(),
         "has_llm": llm.is_configured() and not lite,
         "news_count": len(news_items),
