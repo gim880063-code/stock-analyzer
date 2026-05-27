@@ -1462,8 +1462,12 @@ def render_stock_card(r: dict, favorites: list[str]) -> None:
                         f"DART OPEN API · `{src['fin_report_label']}` 기준"
                         f"{fresh_note}"
                     )
-                elif src.get("has_dart"):
-                    lines.append("- **재무 데이터** — DART (보고서 조회 실패)")
+                elif src.get("has_dart") and src.get("dart_error"):
+                    # 진짜 오류(네트워크·키·HTTP)일 때만 표시.
+                    # ETF·SPAC·신규상장 등 단순 미등록은 dart_error=None이라 조용히 패스.
+                    lines.append(
+                        f"- **재무 데이터** — DART 조회 실패 (`{src['dart_error']}`)"
+                    )
                 if src.get("has_dart") and disclosures:
                     lines.append("- **공시 목록·분류** — DART OPEN API · 최근 30일 접수분 (Gemini 분류)")
                 if src.get("news_count"):

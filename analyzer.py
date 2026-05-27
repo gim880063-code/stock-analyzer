@@ -1014,6 +1014,7 @@ def analyze(code: str, lite: bool = False, deep_top: int = 3) -> AnalysisResult:
     flow_last_date: str | None = None
     fin_report_label: str | None = None
     fin: dict | None = None  # 펀더멘털 backed-out 급등 체크용으로 외부 노출
+    dart_error: str | None = None  # 사용자에게 노출할 만한 "진짜 오류"만 기록 (ETF 등 단순 미등록은 None 유지)
 
     # 외국인/기관 수급 (네이버 금융 스크래핑)
     try:
@@ -1031,6 +1032,9 @@ def analyze(code: str, lite: bool = False, deep_top: int = 3) -> AnalysisResult:
         })
 
     # DART 재무 데이터 (키 설정되어 있을 때만)
+    # 실패 시 점수 카드는 추가하지 않음 — 노이즈 줄이기.
+    # 진짜 오류(네트워크·API)만 dart_error 로 기록해 출처 영역에 표시.
+    # ETF/SPAC 처럼 corp_code 자체가 없는 경우는 영구적이라 조용히 무시.
     if dart.is_configured():
         try:
             fin = dart.get_financials(code)
@@ -1048,13 +1052,14 @@ def analyze(code: str, lite: bool = False, deep_top: int = 3) -> AnalysisResult:
             growth_item = score_growth(fin)
             if growth_item is not None:
                 scores.append(growth_item)
-        except Exception:
-            scores.append({
-                "name": "재무",
-                "score": 0,
-                "msg": "DART 일시 조회 실패 (네트워크·속도 제한 가능성)",
-                "max": 0,
-            })
+        except dart.DartError as e:
+            msg = str(e)
+            # corp_code 미등록 = ETF·SPAC·외국기업 등 → 영구적이므로 조용히
+            # 그 외 = 네트워크·키 오류·HTTP 등 진짜 오류 → 사용자에게 노출
+            if "등록된 회사가 아닙니다" not in msg:
+                dart_error = msg
+        except Exception as e:
+            dart_error = f"내부 오류: {type(e).__name__}: {e}"
 
     # DART 공시 — 50개까지 가져와서 (임원 변동 신고가 많은 종목 대응),
     # 화면 표시·점수는 상위 15개로 제한, 잠정실적 검색은 전체 50개에서.
@@ -1156,6 +1161,7 @@ def analyze(code: str, lite: bool = False, deep_top: int = 3) -> AnalysisResult:
         "news_count": len(news_items),
         "lite_mode": lite,
         "preliminary_used_for_growth": preliminary_used_for_growth,
+        "dart_error": dart_error,
         "analyzed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
 
