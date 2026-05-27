@@ -138,16 +138,19 @@ def get_corp_code(stock_code: str) -> str:
         return _corp_code_mapping[stock_code]
 
 
-def _api_get(path: str, params: dict[str, Any], max_retries: int = 2) -> dict:
+def _api_get(path: str, params: dict[str, Any], max_retries: int = 3) -> dict:
+    """DART API GET. 타임아웃 30초, 재시도 3회 (2s, 5s, 10s 백오프).
+    Streamlit Cloud → DART 가 종종 느려서 기본값 넉넉히."""
     key = _get_api_key()
     if not key:
         raise DartError("DART_API_KEY가 설정되지 않았습니다.")
     params = {"crtfc_key": key, **params}
     import time
     last_exc: Exception | None = None
+    backoff = [2, 5, 10]
     for attempt in range(max_retries + 1):
         try:
-            resp = requests.get(f"{BASE_URL}/{path}", params=params, timeout=20)
+            resp = requests.get(f"{BASE_URL}/{path}", params=params, timeout=30)
             resp.raise_for_status()
             data = resp.json()
             status = data.get("status")
@@ -157,7 +160,8 @@ def _api_get(path: str, params: dict[str, Any], max_retries: int = 2) -> dict:
         except (requests.ConnectionError, requests.Timeout, requests.HTTPError) as e:
             last_exc = e
             if attempt < max_retries:
-                time.sleep(3 + attempt * 2)  # 3s, 5s
+                wait = backoff[min(attempt, len(backoff) - 1)]
+                time.sleep(wait)
                 continue
             raise DartError(f"DART {path} 연결 실패 (재시도 {max_retries}회 후)") from e
         except DartError:
@@ -214,6 +218,119 @@ def _get_last_acnt_error() -> str | None:
     """가장 최근 _fetch_acnt_all 호출에서의 진짜 오류 (013/데이터없음 제외).
     analyzer 가 fin_report_label=None 일 때 진단 메시지로 노출."""
     return _last_acnt_error
+
+
+# ─────────── Gist 기반 재무 캐시 ───────────
+# Streamlit Cloud → DART 네트워크가 종종 막혀서 분석마다 빈 점수가 나오는 문제 대응.
+# 재무 보고서는 분기에 1번만 바뀌므로 6시간 TTL이면 충분하고, DART 호출 실패 시엔
+# 만료된 캐시라도 반환해서 점수가 빈 None으로 떨어지지 않게 함.
+_FIN_CACHE_FILENAME = "dart_financials_cache.json"
+_FIN_CACHE_TTL_HOURS = 6
+_fin_cache_memory: dict | None = None
+_fin_cache_lock = threading.Lock()
+
+
+def _load_fin_cache() -> dict:
+    """Gist + 로컬 파일에서 재무 캐시 로드."""
+    try:
+        import cloud_store
+        data = cloud_store.load(_FIN_CACHE_FILENAME, {})
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_fin_cache(cache: dict) -> None:
+    try:
+        import cloud_store
+        cloud_store.save(_FIN_CACHE_FILENAME, cache)
+    except Exception:
+        pass  # 캐시 저장 실패는 치명적이지 않음 — 다음번에 재시도
+
+
+def _get_fin_cache() -> dict:
+    """메모리 캐시 lazy load — 첫 호출에만 Gist 읽음."""
+    global _fin_cache_memory
+    if _fin_cache_memory is not None:
+        return _fin_cache_memory
+    with _fin_cache_lock:
+        if _fin_cache_memory is None:
+            _fin_cache_memory = _load_fin_cache()
+        return _fin_cache_memory
+
+
+def get_financials_cached(stock_code: str) -> dict:
+    """get_financials 를 Gist 캐시로 감싼 버전. analyzer는 이걸 호출.
+
+    동작:
+      1. 메모리·Gist 캐시에서 stock_code 조회
+      2. fetched_at 이 6시간 이내면 → 캐시 그대로 반환 (DART 호출 안 함)
+      3. 캐시 stale or 없음 → DART 호출
+         - 성공: 캐시 갱신 + 새 데이터 반환
+         - 실패: 옛 캐시 있으면 그것 반환 (cache_stale_fallback 표시),
+                없으면 빈 결과
+    반환 dict 에 메타 필드 추가:
+      _cached: bool — 캐시에서 가져왔는지
+      _cache_fetched_at: str — 캐시 시점 (캐시일 때만)
+      _cache_stale: bool — DART 실패로 옛 캐시 fallback 사용한 경우 True
+    """
+    from datetime import datetime, timedelta
+    cache = _get_fin_cache()
+    entry = cache.get(stock_code)
+
+    # 1) Fresh 캐시 확인
+    if entry and entry.get("fetched_at"):
+        try:
+            ts = datetime.fromisoformat(entry["fetched_at"])
+            if datetime.now() - ts < timedelta(hours=_FIN_CACHE_TTL_HOURS):
+                data = dict(entry.get("data", {}))
+                data["_cached"] = True
+                data["_cache_fetched_at"] = entry["fetched_at"]
+                data["_cache_stale"] = False
+                return data
+        except (ValueError, TypeError):
+            pass
+
+    # 2) DART 호출 시도
+    try:
+        fin = get_financials(stock_code)
+        if fin.get("report_label"):
+            # 진짜 데이터 받았을 때만 캐시 (실패 결과는 캐시하지 않음)
+            with _fin_cache_lock:
+                cache[stock_code] = {
+                    "data": fin,
+                    "fetched_at": datetime.now().isoformat(timespec="seconds"),
+                }
+                _save_fin_cache(cache)
+            fin["_cached"] = False
+            return fin
+    except Exception:
+        pass
+
+    # 3) DART 실패 → stale 캐시 fallback
+    if entry and entry.get("data"):
+        data = dict(entry["data"])
+        data["_cached"] = True
+        data["_cache_fetched_at"] = entry.get("fetched_at", "?")
+        data["_cache_stale"] = True
+        return data
+
+    # 4) 캐시도 없음 → 빈 결과 (기존 get_financials 와 같은 형태)
+    return {
+        "report_label": None,
+        "net_income": None,
+        "equity": None,
+        "debt": None,
+        "revenue": None,
+        "revenue_prev": None,
+        "operating_income": None,
+        "operating_income_prev": None,
+        "roe": None,
+        "debt_ratio": None,
+        "revenue_growth": None,
+        "op_income_growth": None,
+        "_cached": False,
+    }
 
 
 def _fetch_acnt_all(corp_code: str, year: int, reprt_code: str) -> list[dict]:

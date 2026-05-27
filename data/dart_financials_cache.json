@@ -1,0 +1,181 @@
+{
+  "005930": {
+    "data": {
+      "report_label": "2026 1분기보고서",
+      "net_income": null,
+      "equity": 486635976000000,
+      "debt": 146703628000000,
+      "revenue": 133873444000000,
+      "revenue_prev": null,
+      "operating_income": 57232797000000,
+      "operating_income_prev": null,
+      "roe": null,
+      "debt_ratio": 30.15,
+      "revenue_growth": null,
+      "op_income_growth": null,
+      "_cached": false
+    },
+    "fetched_at": "2026-05-27T22:23:44"
+  },
+  "000660": {
+    "data": {
+      "report_label": "2026 1분기보고서",
+      "net_income": null,
+      "equity": 164379799000000,
+      "debt": 58448945000000,
+      "revenue": 52576287000000,
+      "revenue_prev": null,
+      "operating_income": 37610283000000,
+      "operating_income_prev": null,
+      "roe": null,
+      "debt_ratio": 35.56,
+      "revenue_growth": null,
+      "op_income_growth": null,
+      "_cached": false
+    },
+    "fetched_at": "2026-05-27T22:23:45"
+  },
+  "009540": {
+    "data": {
+      "report_label": "2026 1분기보고서",
+      "net_income": null,
+      "equity": 17316556685000,
+      "debt": 24888294971000,
+      "revenue": 8140889752000,
+      "revenue_prev": null,
+      "operating_income": 1355970120000,
+      "operating_income_prev": null,
+      "roe": null,
+      "debt_ratio": 143.73,
+      "revenue_growth": null,
+      "op_income_growth": null,
+      "_cached": false
+    },
+    "fetched_at": "2026-05-27T22:23:45"
+  },
+  "058470": {
+    "data": {
+      "report_label": "2026 1분기보고서",
+      "net_income": null,
+      "equity": 710870347567,
+      "debt": 121166912611,
+      "revenue": 99771175834,
+      "revenue_prev": null,
+      "operating_income": 47300587489,
+      "operating_income_prev": null,
+      "roe": null,
+      "debt_ratio": 17.04,
+      "revenue_growth": null,
+      "op_income_growth": null,
+      "_cached": false
+    },
+    "fetched_at": "2026-05-27T22:23:46"
+  },
+  "006400": {
+    "data": {
+      "report_label": "2026 1분기보고서",
+      "net_income": null,
+      "equity": 24909922230108,
+      "debt": 19596352221381,
+      "revenue": 3576353183422,
+      "revenue_prev": null,
+      "operating_income": 0,
+      "operating_income_prev": null,
+      "roe": null,
+      "debt_ratio": 78.67,
+      "revenue_growth": null,
+      "op_income_growth": null,
+      "_cached": false
+    },
+    "fetched_at": "2026-05-27T22:23:47"
+  },
+  "005380": {
+    "data": {
+      "report_label": "2026 1분기보고서",
+      "net_income": null,
+      "equity": 132226735000000,
+      "debt": 251607472000000,
+      "revenue": 45938886000000,
+      "revenue_prev": null,
+      "operating_income": 2514686000000,
+      "operating_income_prev": null,
+      "roe": null,
+      "debt_ratio": 190.28,
+      "revenue_growth": null,
+      "op_income_growth": null,
+      "_cached": false
+    },
+    "fetched_at": "2026-05-27T22:23:47"
+  },
+  "003550": {
+    "data": {
+      "report_label": "2026 1분기보고서",
+      "net_income": null,
+      "equity": 31602789000000,
+      "debt": 3441768000000,
+      "revenue": null,
+      "revenue_prev": null,
+      "operating_income": 413830000000,
+      "operating_income_prev": null,
+      "roe": null,
+      "debt_ratio": 10.89,
+      "revenue_growth": null,
+      "op_income_growth": null,
+      "_cached": false
+    },
+    "fetched_at": "2026-05-27T22:23:48"
+  },
+  "028260": {
+    "data": {
+      "report_label": "2026 1분기보고서",
+      "net_income": null,
+      "equity": 70115822408350,
+      "debt": 34971588732676,
+      "revenue": 10465823172864,
+      "revenue_prev": null,
+      "operating_income": 720364283642,
+      "operating_income_prev": null,
+      "roe": null,
+      "debt_ratio": 49.88,
+      "revenue_growth": null,
+      "op_income_growth": null,
+      "_cached": false
+    },
+    "fetched_at": "2026-05-27T22:23:48"
+  },
+  "196170": {
+    "data": {
+      "report_label": "2026 1분기보고서",
+      "net_income": 71344275231,
+      "equity": 512858119587,
+      "debt": 216611535645,
+      "revenue": 71598550624,
+      "revenue_prev": null,
+      "operating_income": 39300649498,
+      "operating_income_prev": null,
+      "roe": 13.91,
+      "debt_ratio": 42.24,
+      "revenue_growth": null,
+      "op_income_growth": null,
+      "_cached": false
+    },
+    "fetched_at": "2026-05-27T22:23:49"
+  },
+  "062040": {
+    "data": {
+      "report_label": "2026 1분기보고서",
+      "net_income": 45908124445,
+      "equity": 594829193688,
+      "debt": 137365635453,
+      "revenue": 150322981077,
+      "revenue_prev": null,
+      "operating_income": 55480882863,
+      "operating_income_prev": null,
+      "roe": 7.72,
+      "debt_ratio": 23.09,
+      "revenue_growth": null,
+      "op_income_growth": null
+    },
+    "fetched_at": "2026-05-27T22:23:49"
+  }
+}

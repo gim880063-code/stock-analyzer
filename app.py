@@ -825,7 +825,7 @@ def _progress_update(
 
 
 # 분석 로직이 바뀔 때마다 이 버전을 올려서 기존 캐시를 무효화
-ANALYZER_VERSION = "v29-2026-05-27-expose-dart-api-error"
+ANALYZER_VERSION = "v30-2026-05-27-gist-financials-cache"
 if st.session_state.get("_analyzer_cache_version") != ANALYZER_VERSION:
     cached_analyze.clear()
     st.session_state["_analyzer_cache_version"] = ANALYZER_VERSION
@@ -1457,10 +1457,22 @@ def render_stock_card(r: dict, favorites: list[str]) -> None:
                             f"  \n  ⚠️ 회계기간 종료 후 **{days_old}일 경과** — "
                             f"**{next_exp}보고서** 미제출 상태"
                         )
+                    # 캐시 사용 여부 표시 — DART 직접 호출 실패 시 옛 캐시로 fallback 가능
+                    cache_note = ""
+                    if src.get("fin_cache_stale"):
+                        cache_note = (
+                            f"  \n  ⚠️ DART 일시 오류로 **만료된 캐시 사용** "
+                            f"(저장 시점: `{src.get('fin_cache_fetched_at', '?')}`)"
+                        )
+                    elif src.get("fin_cached"):
+                        cache_note = (
+                            f"  \n  ℹ️ Gist 캐시 사용 "
+                            f"(저장 시점: `{src.get('fin_cache_fetched_at', '?')}`)"
+                        )
                     lines.append(
                         f"- **가치 (PER/PBR) / 재무 건전성 / 성장성** — "
                         f"DART OPEN API · `{src['fin_report_label']}` 기준"
-                        f"{fresh_note}"
+                        f"{fresh_note}{cache_note}"
                     )
                 elif src.get("has_dart") and src.get("dart_error"):
                     # 진짜 오류(네트워크·키·HTTP)일 때만 표시.
