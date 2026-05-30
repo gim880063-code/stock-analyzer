@@ -1,0 +1,59 @@
+name: Daily auto-screen (16:00 KST)
+
+# 매일 평일 16:00 KST = 07:00 UTC. 한국 장 마감(15:30) 30분 후라 거래대금/수급
+# 데이터가 안정적으로 채워진 시점. 주말·공휴일에 fire 돼도 데이터는 동일하므로 무해.
+on:
+  schedule:
+    - cron: '0 7 * * 1-5'
+  workflow_dispatch:
+    inputs:
+      universe:
+        description: '유니버스 (safe / kospi_30 / kospi_50)'
+        required: false
+        default: 'safe'
+      min_score:
+        description: '최소 종합점수'
+        required: false
+        default: '5'
+      deep:
+        description: 'LLM 본문 깊이 분석 여부'
+        required: false
+        default: 'true'
+
+jobs:
+  screen:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run auto-screen
+        env:
+          DART_API_KEY: ${{ secrets.DART_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          # GitHub Actions secret 이름은 GITHUB_ 접두사 사용 불가 → GIST_PAT 으로 저장 후
+          # 컨테이너 안에서 GITHUB_PAT 환경변수로 노출 (cloud_store.py 가 읽는 이름).
+          GITHUB_PAT: ${{ secrets.GIST_PAT }}
+          GIST_ID: ${{ secrets.GIST_ID }}
+          PYTHONUNBUFFERED: '1'
+        run: |
+          UNIVERSE="${{ github.event.inputs.universe || 'safe' }}"
+          MIN_SCORE="${{ github.event.inputs.min_score || '5' }}"
+          DEEP_FLAG=""
+          if [ "${{ github.event.inputs.deep || 'true' }}" = "false" ]; then
+            DEEP_FLAG="--no-deep"
+          fi
+          python auto_screen.py --universe "$UNIVERSE" --min-score "$MIN_SCORE" $DEEP_FLAG

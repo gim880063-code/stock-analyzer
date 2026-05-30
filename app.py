@@ -2550,8 +2550,9 @@ if st.session_state.get("_view_mode") == "verifier":
 
     st.subheader("📊 점수 시뮬레이션 — 점수가 실제 수익률과 맞았는가")
     st.caption(
-        "스크리닝에서 발굴된 종목을 그 시점에 가상으로 매수했다고 가정하고 현재까지의 수익률을 추적합니다. "
-        "현재가는 가장 최근 분석된 종가 기준 — 발굴 후 한 번도 다시 분석되지 않은 종목은 빠집니다."
+        "스크리닝에서 발굴된 종목을 그 시점에 가상으로 매수했다고 가정하고 수익률을 추적합니다. "
+        "고정 시계(5/20/60일)로 비교하면 발굴일 다른 종목도 같은 잣대로 검증되고, "
+        "시장 대비 초과수익(KOSPI·KOSDAQ 차감)으로 시장 방향성과 점수 능력을 분리합니다."
     )
 
     if st.button("← 분석 화면으로 돌아가기", key="back_from_verifier", use_container_width=False):
@@ -2563,14 +2564,17 @@ if st.session_state.get("_view_mode") == "verifier":
         "🔬 항목별 예측력",
     ])
 
-    def _bucket_table(bucket_stats: dict, value_label: str) -> pd.DataFrame:
+    def _bucket_table(bucket_stats: dict) -> pd.DataFrame:
         rows = []
         for label, st_ in bucket_stats.items():
             rows.append({
                 "점수 구간": label,
                 "종목 수": st_["count"],
-                f"평균 {value_label}(%)": st_["avg_return"] if st_["avg_return"] is not None else "-",
+                "평균(%)": st_["avg_return"] if st_["avg_return"] is not None else "-",
+                "중앙값(%)": st_["median_return"] if st_["median_return"] is not None else "-",
                 "승률(%)": st_["win_rate"] if st_["win_rate"] is not None else "-",
+                "초과 평균(%p)": st_["avg_excess"] if st_["avg_excess"] is not None else "-",
+                "초과 승률(%)": st_["excess_win_rate"] if st_["excess_win_rate"] is not None else "-",
                 "최고(%)": st_["best"] if st_["best"] is not None else "-",
                 "최저(%)": st_["worst"] if st_["worst"] is not None else "-",
             })
@@ -2578,66 +2582,141 @@ if st.session_state.get("_view_mode") == "verifier":
 
     # ─── 탭 1: 발굴 가상 수익률 ───
     with tab_scout:
-        score_type = st.radio(
-            "점수 종류 비교 — 어느 점수가 실제 수익률을 가장 잘 예측했는지",
-            options=["total", "short_term", "mid_term"],
-            format_func=lambda t: {
-                "total": "종합 점수 (매매 가중치 적용)",
-                "short_term": "단기 점수 (가중: 거래량·수급·공시·시장강도)",
-                "mid_term": "중기 점수 (가중: 추세·가치·재무·성장성)",
-            }[t],
-            horizontal=True,
-            key="sim_score_type",
-            help=(
-                "단기 점수는 1~4주 매매에 중요도가 높은 항목을 가중 합산. "
-                "중기 점수는 분기 이상에서 효과가 있는 항목만 합산. "
-                "모멘텀(RSI)과 가격리스크는 의심 항목이라 종합점수에만 포함되고 부분합엔 빠짐."
-            ),
+        col_score, col_horizon = st.columns([2, 1])
+        with col_score:
+            score_type = st.radio(
+                "점수 종류",
+                options=["total", "short_term", "mid_term"],
+                format_func=lambda t: {
+                    "total": "종합 (가중)",
+                    "short_term": "단기 (거래량·수급·공시·시장강도)",
+                    "mid_term": "중기 (추세·가치·재무·성장성)",
+                }[t],
+                horizontal=True,
+                key="sim_score_type",
+                help=(
+                    "단기 점수는 1~4주 매매에 중요도 높은 항목을 가중 합산. "
+                    "중기 점수는 분기 이상에서 효과 있는 항목만 합산. "
+                    "모멘텀·가격리스크는 의심 항목이라 종합점수에만 포함."
+                ),
+            )
+        with col_horizon:
+            horizon = st.radio(
+                "보유 시계",
+                options=["5d", "20d", "60d", "all"],
+                format_func=lambda h: {
+                    "5d": "5영업일",
+                    "20d": "20영업일",
+                    "60d": "60영업일",
+                    "all": "발굴일~현재",
+                }[h],
+                horizontal=False,
+                key="sim_horizon",
+                help=(
+                    "5/20/60일은 같은 보유기간으로 비교 — 시계 도달 못 한 종목은 자동 제외. "
+                    "'발굴일~현재'는 보유기간이 종목마다 다르고 시장 흐름에 영향 받음."
+                ),
+            )
+
+        min_hold_days = 0
+        if horizon == "all":
+            min_hold_days = st.slider(
+                "최소 보유 영업일 (이하 제외)",
+                min_value=0, max_value=20,
+                value=verifier.DEFAULT_MIN_HOLD_DAYS,
+                step=1,
+                key="sim_min_hold",
+                help="발굴 직후 종목은 신호가 작동할 시간이 없어 통계에 노이즈를 만듦.",
+            )
+
+        result = verifier.verify_scouted(
+            score_type=score_type,
+            horizon=horizon,
+            min_hold_days=min_hold_days,
         )
-        result = verifier.verify_scouted(score_type=score_type)
+
         if result["total_count"] == 0:
-            if score_type in ("short_term", "mid_term"):
+            short_hold = result.get("excluded_short_hold", 0)
+            missing = result.get("missing_data_count", 0)
+            if score_type in ("short_term", "mid_term") and missing > 0 and short_hold == 0:
                 st.info(
                     f"`{score_type}` 점수가 기록된 발굴 종목이 없습니다. "
-                    "단기·중기 점수는 항목별 점수 스냅샷이 있어야 계산되는데, 이 기능은 "
-                    "최근 추가됐기 때문에 새로 발굴된 종목부터 데이터가 쌓입니다.\n\n"
+                    "단기·중기 점수는 항목별 스냅샷이 있어야 계산되는데, 새로 발굴된 종목부터 데이터가 쌓입니다.\n\n"
                     "사이드바에서 **🔍 발굴 시작**을 한 번 다시 돌려보세요."
+                )
+            elif horizon != "all" and short_hold > 0:
+                st.info(
+                    f"{horizon} 시계에 도달한 발굴 종목이 없습니다 "
+                    f"({short_hold}개가 보유기간 부족으로 제외됨). "
+                    "더 짧은 시계로 보거나 '발굴일~현재'를 선택해보세요."
                 )
             else:
                 st.info(
                     "시뮬레이션할 발굴 종목이 없습니다. 사이드바에서 **🔍 발굴 시작**을 한 번 돌리면 "
-                    "통과 종목들이 자동으로 발굴 추적에 등록되고, 이후 가격 변화가 가상 수익률로 추적됩니다."
+                    "통과 종목들이 자동으로 발굴 추적에 등록됩니다."
                 )
         else:
-            col1, col2, col3 = st.columns(3)
-            col1.metric("발굴 종목", f"{result['total_count']}개")
+            # 메인 메트릭 6칸: 절대 평균/중앙/승률 + 초과 평균/중앙/승률
+            row1 = st.columns(3)
+            row1[0].metric("발굴 종목", f"{result['total_count']}개")
             avg = result.get("overall_avg")
-            col2.metric("평균 수익률", f"{avg:+.2f}%" if avg is not None else "-")
+            row1[1].metric("평균 수익률", f"{avg:+.2f}%" if avg is not None else "-")
             wr = result.get("overall_win_rate")
-            col3.metric("승률", f"{wr}%" if wr is not None else "-")
+            row1[2].metric("승률", f"{wr}%" if wr is not None else "-")
 
-            st.markdown("##### 발굴 시점 점수 구간별 평균 수익률")
+            row2 = st.columns(3)
+            med = result.get("overall_median")
+            row2[0].metric(
+                "중앙값",
+                f"{med:+.2f}%" if med is not None else "-",
+                help="평균은 outlier에 휘둘려서 중앙값과 함께 봐야 진짜 분포가 보임.",
+            )
+            ex_avg = result.get("overall_avg_excess")
+            row2[1].metric(
+                "시장 대비 평균",
+                f"{ex_avg:+.2f}%p" if ex_avg is not None else "-",
+                help="(종목 수익률) − (KOSPI/KOSDAQ 같은 기간 수익률). 양수면 시장 이긴 것.",
+            )
+            ex_wr = result.get("overall_excess_win_rate")
+            row2[2].metric(
+                "시장 이긴 비율",
+                f"{ex_wr}%" if ex_wr is not None else "-",
+                help="초과수익이 양수인 종목 비율. 50% 넘으면 점수가 시장 평균을 이긴다는 신호.",
+            )
+
+            excluded = result.get("excluded_short_hold", 0)
+            if excluded > 0:
+                if horizon == "all":
+                    st.caption(f"ℹ️ 보유기간 {min_hold_days}일 미만인 발굴 {excluded}개 제외됨.")
+                else:
+                    st.caption(f"ℹ️ {horizon} 시계 미도달 발굴 {excluded}개 제외됨.")
+
+            st.markdown("##### 점수 분위별 통계")
             st.caption(
-                "→ '8점 이상에서 발굴됐던 종목들이 평균 +N% 수익이었나' 같은 통계. "
-                "위 구간 평균이 아래 구간 평균보다 일관되게 높으면 점수가 잘 맞고 있는 것."
+                "상위/중위/하위는 발굴 종목들의 점수 분포에서 1/3씩 자동 분할. "
+                "상위 분위의 '초과 평균'이 하위보다 일관되게 높으면 점수가 시장 대비 알파를 만듦."
             )
             st.dataframe(
-                _bucket_table(result["bucket_stats"], "수익률"),
+                _bucket_table(result["bucket_stats"]),
                 hide_index=True, use_container_width=True,
             )
 
             st.markdown("##### 종목별 상세")
+            st.caption("초과수익 내림차순.")
             detail_rows = []
             for r in result["rows"]:
                 cur_score = r.get("current_score")
                 detail_rows.append({
                     "종목": f"{stock_dict.get(r['code'], '?')} ({r['code']})",
                     "발굴일": r["added_at"] or "-",
+                    "보유일": r.get("days_held") if r.get("days_held") is not None else "-",
                     "발굴점수": f"{r['added_score']:+d}" if r["added_score"] is not None else "-",
                     "현재점수": f"{cur_score:+d}" if cur_score is not None else "-",
                     "발굴가": f"{r['added_close']:,.0f}",
                     "현재가": f"{r['current_close']:,.0f}",
                     "수익률(%)": r["return_pct"],
+                    "시장(%)": r.get("market_return_pct") if r.get("market_return_pct") is not None else "-",
+                    "초과(%p)": r.get("excess_return_pct") if r.get("excess_return_pct") is not None else "-",
                     "유니버스": r.get("universe", ""),
                 })
             st.dataframe(pd.DataFrame(detail_rows), hide_index=True, use_container_width=True)
@@ -2665,8 +2744,8 @@ if st.session_state.get("_view_mode") == "verifier":
 
         if item_result["total_samples"] == 0:
             st.info(
-                f"분석에 필요한 데이터가 부족합니다. 항목별 점수 저장은 오늘부터 시작되므로 "
-                f"적어도 {forward_days + 5}일 이상 매일 분석을 돌려야 의미 있는 통계가 나옵니다."
+                f"분석에 필요한 데이터가 부족합니다. 적어도 {forward_days + 5}일 이상 "
+                f"매일 분석을 돌리거나, 분석된 종목 수를 늘려야 의미 있는 통계가 나옵니다."
             )
         else:
             ranked = item_result["ranked_items"]
@@ -2681,7 +2760,7 @@ if st.session_state.get("_view_mode") == "verifier":
             st.markdown(f"##### 항목별 예측력 ({forward_days}일 뒤 수익률 기준)")
             st.dataframe(pd.DataFrame(spread_rows), hide_index=True, use_container_width=True)
 
-            st.markdown("##### 항목 상세 — 점수값별 평균 수익률")
+            st.markdown("##### 항목 상세 — 점수값별 수익률")
             for item in ranked:
                 st_ = item_result["item_stats"][item]
                 with st.expander(
@@ -2694,7 +2773,8 @@ if st.session_state.get("_view_mode") == "verifier":
                         rows.append({
                             "점수값": f"{score_val:+d}",
                             "케이스 수": stat["count"],
-                            "평균 수익률(%)": stat["avg_return"] if stat["avg_return"] is not None else "-",
+                            "평균(%)": stat["avg_return"] if stat["avg_return"] is not None else "-",
+                            "중앙값(%)": stat.get("median_return") if stat.get("median_return") is not None else "-",
                             "승률(%)": stat["win_rate"] if stat["win_rate"] is not None else "-",
                         })
                     st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)

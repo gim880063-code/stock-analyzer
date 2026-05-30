@@ -55,7 +55,7 @@ UNIVERSE_LABELS = {
 #     - RSI(14)는 학술적으로 약한 mean-reversion 신호. 한국시장에서 검증 필요.
 #     - 가격 리스크는 강세 종목을 깎아서 단기 momentum factor를 거꾸로 작용할 가능성.
 #     - 일단 종합점수엔 남기되 부분합엔 미포함 → 시뮬레이션 비교로 검증 후 거취 결정.
-SHORT_TERM_ITEMS = {"거래량", "수급", "공시", "시장 상대강도", "시장 국면"}
+SHORT_TERM_ITEMS = {"거래량", "수급", "공시", "시장 상대강도", "시장 국면", "정렬 위험"}
 MID_TERM_ITEMS = {"추세", "가치", "재무 건전성", "성장성"}
 
 # 매수/매도 판단에 쓰는 종합점수는 단순 합산보다 가격 반응 가능성이 큰 항목에
@@ -75,6 +75,8 @@ SCORE_WEIGHTS: dict[str, int] = {
     "가치": 1,
     "재무 건전성": 1,
     "성장성": 1,
+    # 정렬 위험 — 단기 신호가 동시 정렬된 정점 매수 페널티 (max=0, 음수 only)
+    "정렬 위험": 1,
 }
 
 
@@ -627,6 +629,38 @@ def score_market_regime(code: str) -> ScoreItem | None:
     return {"name": "시장 국면", "score": score, "msg": msg, "max": 1}
 
 
+def score_alignment_risk(scores: list[dict]) -> ScoreItem | None:
+    """다중 정렬 페널티 — 단기 신호가 동시에 +로 정렬되면 정점 매수 가능성.
+
+    근거: 추세·모멘텀·거래량·수급·시장상대강도·시장국면이 한꺼번에 +가 되는 시점은
+    이미 시장이 그 종목을 알아본 후 (=가격에 반영된 후). 시뮬레이션에서 "점수
+    높을수록 수익률 더 안 좋다"는 역전 현상은 이 정점 매수가 누적 원인.
+    개별 신호는 유지하되 메타 페널티로 종합점수를 보수적으로 끌어내림.
+
+    None을 반환할 수도 있지만, 0점 항목으로 항상 추가해서 사용자가 "정렬 신호
+    몇 개 떴는지" 진단을 항상 볼 수 있게 함.
+    """
+    momentum_items = {"추세", "모멘텀", "거래량", "수급", "시장 상대강도", "시장 국면"}
+    positive_count = sum(
+        1 for s in scores
+        if isinstance(s, dict)
+        and s.get("name") in momentum_items
+        and int(s.get("score", 0)) > 0
+    )
+
+    if positive_count >= 5:
+        score = -2
+        msg = f"단기 신호 {positive_count}개 동시 정렬 — 정점 매수 가능성 (이미 가격 반영)"
+    elif positive_count >= 4:
+        score = -1
+        msg = f"단기 신호 {positive_count}개 정렬 — 과도 정렬 주의"
+    else:
+        score = 0
+        msg = f"단기 신호 {positive_count}개 정렬 (4개 미만, 안전)"
+
+    return {"name": "정렬 위험", "score": score, "msg": msg, "max": 0}
+
+
 def score_risk(df: pd.DataFrame) -> ScoreItem:
     close = df["Close"]
     vol = df["Volume"]
@@ -856,6 +890,13 @@ def recompute_score_after_deep(result: dict) -> None:
             break
     if not replaced:
         scores.append(new_item)
+
+    # 공시 점수 변경으로 정렬 카운트가 바뀔 수 있어 정렬 페널티도 재계산.
+    # 기존 정렬 위험 항목은 제거하고 새로 계산해 추가.
+    scores[:] = [s for s in scores if s.get("name") != "정렬 위험"]
+    alignment = score_alignment_risk(scores)
+    if alignment is not None:
+        scores.append(alignment)
 
     total, max_possible = weighted_score(scores)
     result["total"] = total
@@ -1338,6 +1379,12 @@ def analyze(code: str, lite: bool = False, deep_top: int = 3) -> AnalysisResult:
             if not preliminary_used_for_growth:
                 scores.append(prelim_growth)
                 preliminary_used_for_growth = True
+
+    # 정렬 페널티 — 다른 모든 항목 점수 계산 끝난 직후, 합산 전에 추가.
+    # 4개 이상 단기 신호가 +로 동시 정렬되면 정점 매수 위험으로 -1 ~ -2.
+    alignment = score_alignment_risk(scores)
+    if alignment is not None:
+        scores.append(alignment)
 
     total, max_possible = weighted_score(scores)
 

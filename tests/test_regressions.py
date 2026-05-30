@@ -173,5 +173,139 @@ class VerifierConsistencyTests(unittest.TestCase):
         self.assertEqual(verifier._extract_score(info, "total"), 7)
 
 
+class AlignmentRiskTests(unittest.TestCase):
+    """단기 신호가 동시 정렬되면 정점 매수 페널티가 종합점수에서 빠지는지."""
+
+    def _scores(self, **overrides):
+        """기본 0점 항목, overrides로 일부만 +/- 설정."""
+        defaults = {
+            "추세": 0, "모멘텀": 0, "거래량": 0, "수급": 0,
+            "시장 상대강도": 0, "시장 국면": 0,
+        }
+        defaults.update(overrides)
+        return [{"name": k, "score": v, "max": 1} for k, v in defaults.items()]
+
+    def test_no_penalty_when_three_or_fewer_aligned(self):
+        scores = self._scores(추세=1, 모멘텀=1, 거래량=1)  # 3개
+        item = analyzer.score_alignment_risk(scores)
+        self.assertEqual(item["score"], 0)
+
+    def test_minus_one_when_four_aligned(self):
+        scores = self._scores(추세=1, 모멘텀=1, 거래량=1, 수급=1)
+        item = analyzer.score_alignment_risk(scores)
+        self.assertEqual(item["score"], -1)
+
+    def test_minus_two_when_five_or_more_aligned(self):
+        scores = self._scores(추세=1, 모멘텀=1, 거래량=1, 수급=1, **{"시장 상대강도": 1})
+        item = analyzer.score_alignment_risk(scores)
+        self.assertEqual(item["score"], -2)
+
+    def test_penalty_in_short_term_items(self):
+        """정렬 위험은 단기 항목으로 분류돼야 단기 부분합도 함께 보수화됨."""
+        self.assertIn("정렬 위험", analyzer.SHORT_TERM_ITEMS)
+
+    def test_penalty_excluded_from_mid_term_items(self):
+        """중기 부분합에는 들어가면 안 됨 (단기 정렬 페널티이므로)."""
+        self.assertNotIn("정렬 위험", analyzer.MID_TERM_ITEMS)
+
+
+class VerifierHorizonTests(unittest.TestCase):
+    """horizon별 수익률 계산이 영업일 기준으로 정확한지."""
+
+    def _make_series(self, start="2026-01-02", n=30, prices=None):
+        idx = pd.bdate_range(start=start, periods=n)
+        if prices is None:
+            prices = list(range(100, 100 + n))  # 100, 101, 102, ...
+        return pd.Series(prices, index=idx, dtype=float)
+
+    def test_horizon_5d_returns_close_at_5_trading_days_out(self):
+        """5d horizon은 발굴일 + 5 영업일 시점 종가를 반환."""
+        import verifier
+        series = self._make_series(prices=[100.0 + i for i in range(30)])
+        start, end, days, _ = verifier._horizon_return(series, "2026-01-02", "5d")
+        self.assertEqual(start, 100.0)
+        self.assertEqual(end, 105.0)  # 5영업일 후
+        self.assertEqual(days, 5)
+
+    def test_horizon_returns_none_when_window_not_reached(self):
+        """발굴일 + horizon이 데이터 끝을 넘으면 None — 보유기간 부족."""
+        import verifier
+        series = self._make_series(n=10)  # 10영업일치만
+        start, end, days, _ = verifier._horizon_return(series, "2026-01-02", "20d")
+        self.assertIsNone(start)
+        self.assertIsNone(days)
+
+    def test_horizon_all_uses_last_close(self):
+        """horizon='all' 은 발굴일 ~ 마지막 거래일."""
+        import verifier
+        series = self._make_series(n=10, prices=[100.0, 101, 102, 103, 104, 105, 106, 107, 108, 110])
+        start, end, days, _ = verifier._horizon_return(series, "2026-01-02", "all")
+        self.assertEqual(start, 100.0)
+        self.assertEqual(end, 110.0)
+        self.assertEqual(days, 9)
+
+    def test_start_date_snaps_to_next_trading_day(self):
+        """발굴일이 주말이면 다음 영업일로 자동 조정."""
+        import verifier
+        series = self._make_series(start="2026-01-05", n=10)  # 월요일부터
+        # 2026-01-03(토) 은 비영업일 → 다음 영업일 2026-01-05 가 start 가 돼야 함
+        start, end, days, _ = verifier._horizon_return(series, "2026-01-03", "5d")
+        self.assertIsNotNone(start)
+        self.assertEqual(days, 5)
+
+
+class VerifierBucketTests(unittest.TestCase):
+    """분위수 기반 버킷이 점수 분포에 적응하는지."""
+
+    def test_quantile_buckets_splits_into_thirds(self):
+        """충분한 데이터에서 상/중/하 3분할."""
+        import verifier
+        scores = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+        buckets = verifier._quantile_buckets(scores)
+        self.assertEqual(len(buckets), 3)
+        # 모든 점수가 어딘가에 잡혀야 함
+        assigned = [
+            any(pred(s) for _, pred in buckets) for s in scores
+        ]
+        self.assertTrue(all(assigned))
+
+    def test_quantile_buckets_collapses_when_distribution_too_narrow(self):
+        """점수가 한 값에 너무 몰리면 단일 '전체' 버킷."""
+        import verifier
+        scores = [5, 5, 5, 5, 5, 5]
+        buckets = verifier._quantile_buckets(scores)
+        self.assertEqual(len(buckets), 1)
+        self.assertEqual(buckets[0][0], "전체")
+
+    def test_quantile_buckets_handles_too_few_scores(self):
+        """3개 미만이면 단일 '전체' 버킷."""
+        import verifier
+        buckets = verifier._quantile_buckets([7, 8])
+        self.assertEqual(len(buckets), 1)
+
+
+class VerifierStatsTests(unittest.TestCase):
+    """bucket_stats가 절대/초과수익 통계 모두 산출하는지."""
+
+    def test_bucket_stats_separates_abs_and_excess_returns(self):
+        import verifier
+        rows = [
+            {"added_score": 8, "return_pct": 5.0, "excess_return_pct": 2.0},
+            {"added_score": 9, "return_pct": -2.0, "excess_return_pct": 3.0},
+            {"added_score": 7, "return_pct": 1.0, "excess_return_pct": -1.0},
+            {"added_score": 3, "return_pct": -5.0, "excess_return_pct": -8.0},
+            {"added_score": 4, "return_pct": 0.0, "excess_return_pct": -2.0},
+            {"added_score": 2, "return_pct": -3.0, "excess_return_pct": -4.0},
+        ]
+        stats = verifier._bucket_stats(rows, score_key="added_score")
+        # 어떤 버킷이 잡히든 평균/중앙값/승률/초과수익 키가 모두 있어야 함
+        for label, s in stats.items():
+            self.assertIn("avg_return", s)
+            self.assertIn("median_return", s)
+            self.assertIn("win_rate", s)
+            self.assertIn("avg_excess", s)
+            self.assertIn("excess_win_rate", s)
+
+
 if __name__ == "__main__":
     unittest.main()

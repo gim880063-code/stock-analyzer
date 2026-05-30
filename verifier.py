@@ -12,21 +12,142 @@
   Q2. 어떤 항목이 진짜 예측력이 있었는가? (history — 데이터 축적 후)
   Q3. 종합/단기/중기 점수 중 어느 게 가장 잘 맞는가? (score_type 선택)
 
-현재가 조회는 score_history의 가장 최근 close를 사용 (별도 가격 조회 없음 →
-검증 페이지가 빠름). 즉, 시뮬레이션 대상이 되려면 그 종목이 최근 분석된 적이 있어야 함.
-스크리닝을 주기적으로 돌리면 발굴 종목들의 가격이 자동으로 갱신됨.
+핵심 보정 (2026-05 개편):
+  - 고정 시계(horizon) 도입: 5d / 20d / 60d / 보유기간 전체 — 발굴일 다른 종목들의
+    수익률을 같은 잣대로 비교할 수 있게 함.
+  - 시장 대비 초과수익(excess return) 계산: 같은 기간 KOSPI/KOSDAQ 수익률을 빼서,
+    하락장에 -3% 종목이 시장(-8%) 대비 +5%p 강세였다는 사실을 통계가 잡아냄.
+  - 최소 보유일 필터: 발굴 후 며칠 안 된 종목은 통계에서 제외 (신호가 작동할
+    시간이 없어서 노이즈만 만듦).
+  - 분위수 기반 버킷: 고정 임계값 (≥11/6~10/...) 은 발굴 종목이 min_score 위로만
+    걸려 들어와 분포가 편향됨 → 실제 분포에서 상/중/하 1/3씩.
+  - 가격 데이터: FinanceDataReader 로 발굴일~현재 종가를 새로 조회 (stale history
+    의존 제거). 종목당 1회 fetch 후 lru_cache.
 """
 from collections import defaultdict
-from statistics import mean
+from datetime import datetime, timedelta
+from functools import lru_cache
+from statistics import mean, median
 
-from analyzer import SHORT_TERM_ITEMS, MID_TERM_ITEMS, weighted_score
+import pandas as pd
+import FinanceDataReader as fdr
+
+from analyzer import SHORT_TERM_ITEMS, MID_TERM_ITEMS, weighted_score, _stock_market
 import history
 import scouted
 
 
 SCORE_TYPES = ("total", "short_term", "mid_term")
 
+# 시뮬레이션에서 사용하는 고정 보유 기간 옵션.
+# "all" 은 발굴일부터 현재(마지막 거래일)까지의 총 수익률.
+HORIZONS = ("5d", "20d", "60d", "all")
+HORIZON_DAYS = {"5d": 5, "20d": 20, "60d": 60}
 
+# 신호가 작동할 시간 부족한 종목은 통계 노이즈 — 기본 최소 5 영업일 보유 필요.
+DEFAULT_MIN_HOLD_DAYS = 5
+
+
+# ─────────── 가격 fetch 헬퍼 ───────────
+# 종목별/지수별로 1회만 fetch (lru_cache). 일자 키는 오늘 날짜로 잡아
+# 같은 날 안에서는 같은 결과 캐싱, 다음 날엔 자동 재조회.
+@lru_cache(maxsize=256)
+def _fetch_close_series(code: str, today_key: str) -> pd.Series | None:
+    """종목의 일별 종가 시리즈 (최근 1년). 실패 시 None."""
+    try:
+        end = datetime.now()
+        start = end - timedelta(days=400)
+        df = fdr.DataReader(code, start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"))
+        if df is None or df.empty:
+            return None
+        return df["Close"].astype(float)
+    except Exception:
+        return None
+
+
+@lru_cache(maxsize=4)
+def _fetch_market_series(market: str, today_key: str) -> pd.Series | None:
+    """시장 지수 종가 시리즈."""
+    idx_code = "KS11" if market == "KOSPI" else "KQ11"
+    try:
+        end = datetime.now()
+        start = end - timedelta(days=400)
+        df = fdr.DataReader(idx_code, start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"))
+        if df is None or df.empty:
+            return None
+        return df["Close"].astype(float)
+    except Exception:
+        return None
+
+
+def _today_key() -> str:
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+def _safe_market_for_code(code: str) -> str:
+    try:
+        return _stock_market(code)
+    except Exception:
+        return "KOSPI"
+
+
+def _find_idx_on_or_after(series: pd.Series, date_str: str) -> int | None:
+    """series.index (DatetimeIndex) 에서 date_str 이상 첫 위치. 없으면 None."""
+    try:
+        target = pd.Timestamp(date_str)
+    except Exception:
+        return None
+    # searchsorted 로 O(log n).
+    pos = series.index.searchsorted(target, side="left")
+    if pos >= len(series):
+        return None
+    return int(pos)
+
+
+def _horizon_return(
+    series: pd.Series,
+    start_date: str,
+    horizon: str,
+) -> tuple[float | None, float | None, int | None, int | None]:
+    """
+    Args:
+        series: 일별 종가 시리즈 (DatetimeIndex)
+        start_date: 발굴일 (YYYY-MM-DD)
+        horizon: "5d" | "20d" | "60d" | "all"
+
+    Returns:
+        (start_close, end_close, days_held_trading, end_idx)
+        - days_held_trading: 영업일 수 (start_idx ~ end_idx 거리)
+        - 데이터 부족 시 (None, None, None, None)
+    """
+    if series is None or series.empty:
+        return None, None, None, None
+
+    start_idx = _find_idx_on_or_after(series, start_date)
+    if start_idx is None:
+        return None, None, None, None
+
+    if horizon == "all":
+        end_idx = len(series) - 1
+    else:
+        offset = HORIZON_DAYS.get(horizon)
+        if offset is None:
+            return None, None, None, None
+        end_idx = start_idx + offset
+        # 아직 horizon 도달 안 한 종목은 통계 제외 (보유기간 부족).
+        if end_idx >= len(series):
+            return None, None, None, None
+
+    if end_idx <= start_idx:
+        return None, None, None, None
+
+    start_close = float(series.iloc[start_idx])
+    end_close = float(series.iloc[end_idx])
+    days_held = end_idx - start_idx
+    return start_close, end_close, days_held, end_idx
+
+
+# ─────────── 점수 추출 (legacy 호환) ───────────
 def _extract_score(info: dict, score_type: str) -> int | None:
     """발굴 엔트리에서 지정한 점수 종류 추출. 데이터 없으면 None.
 
@@ -34,19 +155,17 @@ def _extract_score(info: dict, score_type: str) -> int | None:
     SCORE_WEIGHTS 로 재계산. 이렇게 안 하면 가중치 도입 이전 발굴분의
     added_score (단순합산) 과 이후 (가중합산) 가 섞여 bucket 분석이 왜곡됨.
 
-    added_scores 없는 옛 엔트리 (2026-05 이전) 만 저장된 added_score 사용.
+    added_scores 없는 옛 엔트리만 저장된 added_score 사용.
     """
     added_scores = info.get("added_scores")
 
     if score_type == "total":
-        # 항목별 스냅샷 있으면 가중 재계산 — 가중치 정책 바뀌어도 일관성 유지
         if added_scores:
             score_items = [
                 {"name": k, "score": int(v), "max": 1}
                 for k, v in added_scores.items()
             ]
             return weighted_score(score_items)[0]
-        # 옛 엔트리 fallback (단순합산 그대로 — 가중치 도입 이전 데이터)
         return info.get("added_score")
 
     if not added_scores:
@@ -65,50 +184,8 @@ def _extract_score(info: dict, score_type: str) -> int | None:
     return weighted_score(score_items, items)[0]
 
 
-# 점수 구간 — 종합/단기/중기 점수는 max 값이 달라서 bucket도 다르게.
-# 2026-05 가중치 도입 후 max 값:
-#   종합 max ≈ 16 (단기 9 + 중기 6 + 추세·모멘텀·가격리스크 가중 1)
-#   단기 max ≈ 9 (거래량·수급·공시·시장상대강도 각 2 + 시장 국면 1)
-#   중기 max ≈ 6 (가치·재무·성장성·추세 — 가중치 영향 없음)
-# 비율 기준 (≥66% 강력 / 33~63% 긍정 / 12~32% 중립+ / <12% 관망) 유지하며 재조정.
-_BUCKETS_TOTAL = [
-    ("≥11 (강력)", lambda s: s >= 11),
-    ("6~10 (긍정)", lambda s: 6 <= s <= 10),
-    ("2~5 (중립+)", lambda s: 2 <= s <= 5),
-    ("≤1 (관망)", lambda s: s <= 1),
-]
-_BUCKETS_SHORT = [
-    ("≥6 (강력)", lambda s: s >= 6),
-    ("2~5 (긍정)", lambda s: 2 <= s <= 5),
-    ("0~1 (중립)", lambda s: 0 <= s <= 1),
-    ("≤-1 (관망)", lambda s: s <= -1),
-]
-_BUCKETS_MID = [
-    ("≥5 (강력)", lambda s: s >= 5),
-    ("2~4 (긍정)", lambda s: 2 <= s <= 4),
-    ("0~1 (중립)", lambda s: 0 <= s <= 1),
-    ("≤-1 (관망)", lambda s: s <= -1),
-]
-
-
-def _buckets_for(score_type: str):
-    if score_type == "short_term":
-        return _BUCKETS_SHORT
-    if score_type == "mid_term":
-        return _BUCKETS_MID
-    return _BUCKETS_TOTAL
-
-
-def _latest_entry_from_history(code: str) -> dict | None:
-    """history에 저장된 가장 최근 entry. 없으면 None."""
-    entries = history.get_history(code, days=365)
-    return entries[-1] if entries else None
-
-
 def _extract_score_from_entry(entry: dict, score_type: str) -> int | None:
-    """history entry에서 지정한 점수 종류 추출. 발굴 entry의 _extract_score와
-    같은 로직이지만 필드명이 다름 (total/scores vs added_score/added_scores).
-    가중치 일관성 유지를 위해 scores 있으면 항상 현재 SCORE_WEIGHTS 로 재계산."""
+    """history entry 에서 같은 로직으로 추출 (필드명만 다름)."""
     scores = entry.get("scores")
 
     if score_type == "total":
@@ -136,137 +213,282 @@ def _extract_score_from_entry(entry: dict, score_type: str) -> int | None:
     return weighted_score(score_items, items)[0]
 
 
-def _bucket_stats(rows: list[dict], value_key: str, score_key: str, score_type: str = "total") -> dict:
-    """점수 구간별 평균 수익률·승률 계산. score_type에 맞는 bucket 사용."""
-    bucket_def = _buckets_for(score_type)
-    buckets: dict[str, list[float]] = {label: [] for label, _ in bucket_def}
+# ─────────── 분위수 기반 버킷 ───────────
+# 스크리닝이 min_score 위만 scouted 에 등록하므로 점수 분포가 편향됨.
+# 고정 임계값(≥11 강력 등) 은 빈 버킷 만들기 일쑤 → 실제 분포에서 상/중/하 1/3.
+def _quantile_buckets(scores: list[int]) -> list[tuple[str, callable]]:
+    """점수 리스트에서 분위수 임계를 잡아 (label, predicate) 튜플 반환.
+
+    종목 수가 3개 미만이면 단일 '전체' 버킷만 반환 (분위 의미 없음).
+    상/중/하 임계가 같은 값이면 (모두 동점) 의미 있는 분할 불가 → 단일 버킷.
+    """
+    valid = [s for s in scores if s is not None]
+    if len(valid) < 3:
+        return [("전체", lambda s: s is not None)]
+
+    sorted_scores = sorted(valid)
+    n = len(sorted_scores)
+    q1 = sorted_scores[n // 3]          # 하위 1/3 경계
+    q2 = sorted_scores[(2 * n) // 3]    # 상위 1/3 경계
+
+    if q1 == q2:
+        # 분포가 한 점에 너무 몰림 — 분위 의미 없음.
+        return [("전체", lambda s: s is not None)]
+
+    return [
+        (f"상위 (≥{q2})", (lambda s, t=q2: s is not None and s >= t)),
+        (f"중위 ({q1}~{q2 - 1})", (lambda s, lo=q1, hi=q2: s is not None and lo <= s < hi)),
+        (f"하위 (<{q1})", (lambda s, t=q1: s is not None and s < t)),
+    ]
+
+
+def _bucket_stats(
+    rows: list[dict],
+    score_key: str,
+    abs_return_key: str = "return_pct",
+    excess_return_key: str = "excess_return_pct",
+) -> dict:
+    """점수 구간별 통계 — 절대 수익률·초과수익률 각각 평균/중앙값/승률 산출."""
+    bucket_def = _quantile_buckets([r.get(score_key) for r in rows])
+
+    groups: dict[str, list[dict]] = {label: [] for label, _ in bucket_def}
     for r in rows:
         s = r.get(score_key)
-        if s is None:
-            continue
         for label, predicate in bucket_def:
             if predicate(s):
-                buckets[label].append(r[value_key])
+                groups[label].append(r)
                 break
-    return {
-        label: {
-            "count": len(returns),
-            "avg_return": round(mean(returns), 2) if returns else None,
+
+    out: dict[str, dict] = {}
+    for label, entries in groups.items():
+        abs_vals = [e[abs_return_key] for e in entries if e.get(abs_return_key) is not None]
+        ex_vals = [e[excess_return_key] for e in entries if e.get(excess_return_key) is not None]
+        out[label] = {
+            "count": len(entries),
+            "avg_return": round(mean(abs_vals), 2) if abs_vals else None,
+            "median_return": round(median(abs_vals), 2) if abs_vals else None,
             "win_rate": (
-                round(sum(1 for x in returns if x > 0) / len(returns) * 100, 1)
-                if returns else None
+                round(sum(1 for x in abs_vals if x > 0) / len(abs_vals) * 100, 1)
+                if abs_vals else None
             ),
-            "best": round(max(returns), 2) if returns else None,
-            "worst": round(min(returns), 2) if returns else None,
+            "avg_excess": round(mean(ex_vals), 2) if ex_vals else None,
+            "median_excess": round(median(ex_vals), 2) if ex_vals else None,
+            "excess_win_rate": (
+                round(sum(1 for x in ex_vals if x > 0) / len(ex_vals) * 100, 1)
+                if ex_vals else None
+            ),
+            "best": round(max(abs_vals), 2) if abs_vals else None,
+            "worst": round(min(abs_vals), 2) if abs_vals else None,
         }
-        for label, returns in buckets.items()
-    }
+    return out
 
 
-def verify_scouted(score_type: str = "total") -> dict:
+# ─────────── 메인: 발굴 가상 매매 검증 ───────────
+def verify_scouted(
+    score_type: str = "total",
+    horizon: str = "all",
+    min_hold_days: int = DEFAULT_MIN_HOLD_DAYS,
+) -> dict:
     """
-    발굴 종목들의 발굴 후 수익률 + 점수 구간별 평균.
+    발굴 종목들의 발굴 후 수익률 통계.
 
-    score_type: "total" | "short_term" | "mid_term"
-      - total: 발굴 시점 종합 점수 (added_score) — 모든 발굴 엔트리 가능
-      - short_term: SHORT_TERM_ITEMS 항목만 합산 — added_scores 있는 엔트리만
-      - mid_term: MID_TERM_ITEMS 항목만 합산 — added_scores 있는 엔트리만
+    Args:
+        score_type: "total" | "short_term" | "mid_term"
+        horizon: "5d" | "20d" | "60d" | "all"
+            - 5d/20d/60d: 발굴일 + N 영업일 시점 종가까지의 수익률
+              (해당 기간 도달 못 한 종목은 자동 제외)
+            - all: 발굴일 ~ 마지막 거래일 (보유기간 종목마다 다름)
+        min_hold_days: 통계 계산에 포함되는 최소 보유 영업일.
+            horizon="all" 일 때만 의미. horizon="5d"는 자동으로 5일 보유한 종목만.
 
     반환:
-      rows: 종목별 상세 (수익률 내림차순)
-      bucket_stats: 점수 구간별 평균 수익률·승률
-      total_count: 검증 가능한 종목 수
-      missing_data_count: 검증 불가능한 종목 수 (점수 또는 가격 데이터 부족)
-      score_type: 사용된 점수 종류
+        rows: 종목별 상세 (excess_return_pct 내림차순)
+        bucket_stats: 점수 분위별 평균/중앙값/승률 + 초과수익 통계
+        total_count: 통계 포함 종목 수
+        excluded_short_hold: min_hold_days 미달로 제외된 종목 수
+        missing_data_count: 점수·가격 데이터 없어 검증 불가능한 종목 수
+        overall_*: 전체 평균/중앙값/승률 (절대 + 초과)
+        score_type, horizon, min_hold_days: echo back
     """
     if score_type not in SCORE_TYPES:
         score_type = "total"
+    if horizon not in HORIZONS:
+        horizon = "all"
 
     items = scouted.load_scouted()
+    today = _today_key()
+
     rows: list[dict] = []
+    excluded_short_hold = 0
+    missing_data_count = 0
+
     for code, info in items.items():
-        added_close = info.get("added_close")
-        if not added_close:
+        added_at = info.get("added_at")
+        if not added_at:
+            missing_data_count += 1
             continue
+
         score = _extract_score(info, score_type)
         if score is None:
+            missing_data_count += 1
             continue
-        last_entry = _latest_entry_from_history(code)
-        if not last_entry:
+
+        series = _fetch_close_series(code, today)
+        if series is None or series.empty:
+            missing_data_count += 1
             continue
-        last_close = last_entry.get("close")
-        if not last_close:
+
+        start_close, end_close, days_held, end_idx = _horizon_return(series, added_at, horizon)
+        if start_close is None:
+            # 5d/20d/60d 도달 못 한 케이스 — "데이터 부족" 으로 분류 안 함 (시간만 부족).
+            if horizon != "all":
+                excluded_short_hold += 1
+            else:
+                missing_data_count += 1
             continue
-        ret_pct = (last_close / added_close - 1) * 100
+
+        # horizon="all" + min_hold_days 미달 → 보유 부족으로 제외.
+        if horizon == "all" and days_held is not None and days_held < min_hold_days:
+            excluded_short_hold += 1
+            continue
+
+        ret_pct = (end_close / start_close - 1) * 100
+
+        # 시장 대비 초과수익
+        market = _safe_market_for_code(code)
+        market_series = _fetch_market_series(market, today)
+        market_ret = None
+        excess = None
+        if market_series is not None and not market_series.empty:
+            m_start_idx = _find_idx_on_or_after(market_series, added_at)
+            if m_start_idx is not None:
+                # 시장도 같은 영업일 기준으로 매핑.
+                if horizon == "all":
+                    m_end_idx = len(market_series) - 1
+                else:
+                    m_end_idx = m_start_idx + HORIZON_DAYS[horizon]
+                if 0 <= m_end_idx < len(market_series) and m_end_idx > m_start_idx:
+                    m_start = float(market_series.iloc[m_start_idx])
+                    m_end = float(market_series.iloc[m_end_idx])
+                    if m_start > 0:
+                        market_ret = (m_end / m_start - 1) * 100
+                        excess = ret_pct - market_ret
+
+        # 현재 점수 (참고용) — history 에서 최근 entry
+        last_entry = None
+        try:
+            hist_entries = history.get_history(code, days=365)
+            last_entry = hist_entries[-1] if hist_entries else None
+        except Exception:
+            pass
+        current_score = (
+            _extract_score_from_entry(last_entry, score_type) if last_entry else None
+        )
+
         rows.append({
             "code": code,
-            "added_at": info.get("added_at"),
+            "added_at": added_at,
             "added_score": score,
-            "added_close": added_close,
-            "current_close": last_close,
-            "current_date": last_entry.get("date"),
-            "current_score": _extract_score_from_entry(last_entry, score_type),
+            "added_close": start_close,
+            "current_close": end_close,
+            "days_held": days_held,
             "return_pct": round(ret_pct, 2),
+            "market": market,
+            "market_return_pct": round(market_ret, 2) if market_ret is not None else None,
+            "excess_return_pct": round(excess, 2) if excess is not None else None,
+            "current_score": current_score,
             "universe": info.get("universe", ""),
         })
 
-    rows.sort(key=lambda r: r["return_pct"], reverse=True)
+    # 초과수익 내림차순 (None은 뒤로)
+    rows.sort(
+        key=lambda r: (
+            r.get("excess_return_pct") is None,
+            -(r.get("excess_return_pct") or 0),
+        )
+    )
+
+    abs_vals = [r["return_pct"] for r in rows]
+    ex_vals = [r["excess_return_pct"] for r in rows if r["excess_return_pct"] is not None]
 
     return {
         "rows": rows,
-        "bucket_stats": _bucket_stats(rows, "return_pct", "added_score", score_type),
+        "bucket_stats": _bucket_stats(rows, score_key="added_score"),
         "total_count": len(rows),
-        "missing_data_count": len(items) - len(rows),
-        "overall_avg": round(mean([r["return_pct"] for r in rows]), 2) if rows else None,
+        "excluded_short_hold": excluded_short_hold,
+        "missing_data_count": missing_data_count,
+        "overall_avg": round(mean(abs_vals), 2) if abs_vals else None,
+        "overall_median": round(median(abs_vals), 2) if abs_vals else None,
         "overall_win_rate": (
-            round(sum(1 for r in rows if r["return_pct"] > 0) / len(rows) * 100, 1)
-            if rows else None
+            round(sum(1 for x in abs_vals if x > 0) / len(abs_vals) * 100, 1)
+            if abs_vals else None
+        ),
+        "overall_avg_excess": round(mean(ex_vals), 2) if ex_vals else None,
+        "overall_median_excess": round(median(ex_vals), 2) if ex_vals else None,
+        "overall_excess_win_rate": (
+            round(sum(1 for x in ex_vals if x > 0) / len(ex_vals) * 100, 1)
+            if ex_vals else None
         ),
         "score_type": score_type,
+        "horizon": horizon,
+        "min_hold_days": min_hold_days,
     }
 
 
+# ─────────── 항목별 점수 예측력 ───────────
 def verify_item_scores(forward_days: int = 5) -> dict:
     """
-    history 기반 항목별 점수 → forward_days일 뒤 수익률 분석.
+    history 기반 항목별 점수 → forward_days 영업일 뒤 수익률 분석.
 
-    로직:
-      각 종목의 일별 엔트리를 슬라이딩 윈도우로 보면서,
-      "이 날 항목 X의 점수가 +1이었던 케이스"의 forward_days일 뒤 수익률을 모은다.
-      점수가 -1이었던 케이스와 평균 수익률 차이가 크면 그 항목이 예측력 있음.
+    개편 (2026-05):
+      이전 로직은 같은 종목의 history 엔트리 인덱스 차이로 forward return 을
+      계산해서, 매일 분석을 안 돌리면 forward_days 갭이 안 채워져 거의 0건이었음.
+      이제 점수 기록일을 anchor 로 잡고, FinanceDataReader 가격으로 정확히
+      forward_days 영업일 뒤 종가를 가져와 forward return 계산.
 
     forward_days: 5(단기) / 20(중기) / 60(장기) 권장.
-                  데이터가 forward_days보다 짧으면 그 종목은 분석에서 제외됨.
-
-    한계: 같은 종목의 시점별 점수 변화를 보는 것이라, 종목 수가 많아도
-          분석 가능한 (시점, 종목) 페어 수가 보존된 일수에 비례. 의미 있는 통계가
-          나오려면 일별 분석 누적이 수십~수백 케이스 필요.
     """
     all_hist = history.load_all()
+    today = _today_key()
 
-    # {item_name: {score_value: [returns]}}
     per_item: dict[str, dict[int, list[float]]] = defaultdict(lambda: defaultdict(list))
     sample_count = 0
 
     for code, entries in all_hist.items():
+        if not entries:
+            continue
+
+        series = _fetch_close_series(code, today)
+        if series is None or series.empty:
+            continue
+
         # 날짜순 정렬 (저장 시 정렬되지만 안전을 위해)
-        entries = sorted(entries, key=lambda e: e.get("date", ""))
-        for i, e in enumerate(entries):
+        entries_sorted = sorted(entries, key=lambda e: e.get("date", ""))
+        for e in entries_sorted:
             scores = e.get("scores")
             if not scores:
                 continue
-            if i + forward_days >= len(entries):
+            anchor_date = e.get("date")
+            if not anchor_date:
                 continue
-            close_now = e.get("close")
-            close_future = entries[i + forward_days].get("close")
-            if not close_now or not close_future:
+
+            start_idx = _find_idx_on_or_after(series, anchor_date)
+            if start_idx is None:
                 continue
-            ret = (close_future / close_now - 1) * 100
+            end_idx = start_idx + forward_days
+            if end_idx >= len(series):
+                continue
+
+            start_close = float(series.iloc[start_idx])
+            end_close = float(series.iloc[end_idx])
+            if start_close <= 0:
+                continue
+
+            ret = (end_close / start_close - 1) * 100
             sample_count += 1
             for item_name, item_score in scores.items():
                 per_item[item_name][int(item_score)].append(ret)
 
-    # 항목별 통계 — 각 점수값(-2, -1, 0, +1, +2)별 평균 수익률·승률
     item_stats: dict[str, dict] = {}
     for item, score_map in per_item.items():
         by_score = {}
@@ -274,13 +496,12 @@ def verify_item_scores(forward_days: int = 5) -> dict:
             by_score[score_val] = {
                 "count": len(returns),
                 "avg_return": round(mean(returns), 2) if returns else None,
+                "median_return": round(median(returns), 2) if returns else None,
                 "win_rate": (
                     round(sum(1 for r in returns if r > 0) / len(returns) * 100, 1)
                     if returns else None
                 ),
             }
-        # 예측력 지표: (양수 점수 평균) - (음수 점수 평균)
-        # 양수 = 항목이 양호하다고 판단한 케이스, 음수 = 안 좋다고 판단한 케이스
         pos_returns = [r for s, rs in score_map.items() if s > 0 for r in rs]
         neg_returns = [r for s, rs in score_map.items() if s < 0 for r in rs]
         spread = None
@@ -289,11 +510,10 @@ def verify_item_scores(forward_days: int = 5) -> dict:
 
         item_stats[item] = {
             "by_score": by_score,
-            "predictive_spread": spread,  # +면 항목이 예측력 있음, -면 반대로 작동, None이면 데이터 부족
+            "predictive_spread": spread,
             "total_samples": sum(len(rs) for rs in score_map.values()),
         }
 
-    # 예측력 spread 큰 순으로 정렬한 키 리스트도 제공
     ranked_items = sorted(
         item_stats.keys(),
         key=lambda k: (item_stats[k]["predictive_spread"] or -999),
