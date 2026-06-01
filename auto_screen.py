@@ -187,6 +187,20 @@ def run(universe: str, min_score: int, deep: bool, workers: int) -> dict:
         _log(f"scouted 저장 실패: {type(e).__name__}: {e}")
         added, skipped = 0, 0
 
+    # 보유 종목 청산 점검 — 매수 발굴과 대칭으로 '나갈 때'도 매일 점검
+    try:
+        import holdings_monitor
+        held = holdings_monitor.monitor_holdings()
+        holdings_monitor.save_alerts_snapshot(held)
+        n_act = holdings_monitor.count_actionable(held)
+        _log(f"보유 점검: {len(held)}종목 중 조치 알림 {n_act}건")
+        for hh in held:
+            for a in hh.get("alerts", []):
+                if a.get("level") in ("high", "medium"):
+                    _log(f"  ⚠ {hh.get('name')}: {a.get('msg')}")
+    except Exception as e:
+        _log(f"보유 점검 실패: {type(e).__name__}: {e}")
+
     # Gist 동기화 결과
     try:
         for line in cloud_store.get_sync_log()[-10:]:

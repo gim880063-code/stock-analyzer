@@ -13,9 +13,10 @@ from streamlit_autorefresh import st_autorefresh
 
 from analyzer import (
     KOREAN_NAMES, UNIVERSE_LABELS, all_korean_stocks, analyze,
-    get_universe_codes,
+    get_universe_codes, position_size,
 )
 import dart
+import holdings_monitor
 import llm
 import portfolio as port
 import history as hist_module
@@ -309,6 +310,7 @@ with st.sidebar:
                 unsafe_allow_html=True,
             )
 
+        _trail_pct = float(port.load_settings().get("trail_pct", 10.0))
         for code, h in portfolio.items():
             name = stock_dict.get(code, "?")
             r = results_map.get(code)
@@ -334,6 +336,16 @@ with st.sidebar:
                             f"{pnl['profit']:+,.0f}원 ({pnl['profit_pct']:+.2f}%)</span></small>"
                         )
                     st.markdown(info, unsafe_allow_html=True)
+                    if r:
+                        _ev = holdings_monitor.evaluate_holding(
+                            code, name, h, r, trail_pct=_trail_pct,
+                        )
+                        for _a in _ev["alerts"]:
+                            _icon = holdings_monitor.LEVEL_ICON.get(_a["level"], "•")
+                            st.markdown(
+                                f"<small>{_icon} {_a['msg']}</small>",
+                                unsafe_allow_html=True,
+                            )
                 with col_x:
                     if st.button("✖", key=f"del_port_{code}", help="포트폴리오에서 제거"):
                         port.remove_holding(code)
@@ -359,8 +371,44 @@ with st.sidebar:
         if st.button("저장", key="port_add_save", use_container_width=True):
             # "삼성전자 005930" 형식 → 마지막 토큰이 6자리 코드
             code = port_sel.rsplit(maxsplit=1)[-1]
-            port.add_holding(code, port_qty, port_price)
+            # 분석된 종목이면 매수 시점 손절/목표가도 함께 저장 → 보유 점검 기준이 됨
+            _plan = (results_map.get(code) or {}).get("trade_plan") or {}
+            port.add_holding(
+                code, port_qty, port_price,
+                stop_loss=_plan.get("stop_loss"),
+                target_1r=_plan.get("target_1r"),
+                target_2r=_plan.get("target_2r"),
+            )
             st.success(f"{stock_dict.get(code, code)} 저장됨")
+            st.rerun()
+
+    with st.expander("⚙️ 투자금·리스크 설정 (매수 수량 제안)"):
+        _rs = port.load_settings()
+        _eq = st.number_input(
+            "총 투자금 (원)", min_value=0, step=1_000_000,
+            value=int(_rs["account_equity"]), key="rs_equity",
+            help="0이면 매수 수량 제안이 꺼집니다.",
+        )
+        _risk = st.number_input(
+            "종목당 리스크 (%)", min_value=0.1, max_value=10.0, step=0.1,
+            value=float(_rs["risk_per_trade_pct"]), key="rs_risk",
+            help="한 종목이 손절되면 계좌의 몇 %를 잃을지. 보통 0.5~2%.",
+        )
+        _maxpos = st.number_input(
+            "종목당 최대 비중 (%)", min_value=1.0, max_value=100.0, step=1.0,
+            value=float(_rs["max_position_pct"]), key="rs_maxpos",
+        )
+        _trail = st.number_input(
+            "트레일링 스톱 (고점 대비 %)", min_value=1.0, max_value=50.0, step=1.0,
+            value=float(_rs["trail_pct"]), key="rs_trail",
+            help="보유 종목이 고점 대비 이만큼 떨어지면 '이익 보호' 알림.",
+        )
+        if st.button("설정 저장", key="rs_save", use_container_width=True):
+            port.save_settings({
+                "account_equity": _eq, "risk_per_trade_pct": _risk,
+                "max_position_pct": _maxpos, "trail_pct": _trail,
+            })
+            st.success("리스크 설정 저장됨")
             st.rerun()
 
     # ─────────── 점수 시뮬레이션 진입점 ───────────
@@ -1300,6 +1348,26 @@ def render_stock_card(r: dict, favorites: list[str]) -> None:
                         "*R(Risk) = 진입가 - 손절가*. "
                         "1R 목표는 손절폭만큼의 이익 (손익비 1:1), 2R은 2배 (1:2)."
                     )
+
+                # 포지션 사이징 — 리스크 설정이 있으면 매수 수량 제안 (정보용, 추천 아님)
+                _rs = port.load_settings()
+                if _rs.get("account_equity", 0) and plan.get("stop_loss"):
+                    _ps = position_size(
+                        entry_price=plan.get("entry_price") or r["last_close"],
+                        stop_loss=plan.get("stop_loss"),
+                        account_equity=_rs["account_equity"],
+                        risk_per_trade_pct=_rs["risk_per_trade_pct"],
+                        max_position_pct=_rs["max_position_pct"],
+                    )
+                    if _ps["ok"]:
+                        _cap = " (최대비중 상한 적용)" if _ps["capped"] else ""
+                        st.markdown(
+                            f"- **제안 매수 수량**: 약 **{_ps['shares']:,}주** "
+                            f"(약 {_ps['position_value']:,.0f}원 · 계좌의 {_ps['position_pct']:.0f}%){_cap}\n"
+                            f"- 손절 시 예상 손실 약 **{_ps['risk_amount']:,.0f}원** — {_ps['note']}"
+                        )
+                    elif _ps["note"]:
+                        st.caption(f"💡 매수 수량 제안: {_ps['note']}")
 
         # 보유 종목이면 손익 badge
         portfolio_local = port.load_portfolio()

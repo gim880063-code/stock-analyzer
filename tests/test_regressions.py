@@ -15,7 +15,9 @@ sys.path.insert(0, str(ROOT))
 import analyzer  # noqa: E402
 import cloud_store  # noqa: E402
 import dart  # noqa: E402
+import holdings_monitor  # noqa: E402
 import llm  # noqa: E402
+import portfolio  # noqa: E402
 
 
 class _Response:
@@ -305,6 +307,109 @@ class VerifierStatsTests(unittest.TestCase):
             self.assertIn("win_rate", s)
             self.assertIn("avg_excess", s)
             self.assertIn("excess_win_rate", s)
+
+
+class PositionSizeTests(unittest.TestCase):
+    def test_basic_risk_sizing(self):
+        out = analyzer.position_size(
+            entry_price=100, stop_loss=90, account_equity=1_000_000,
+            risk_per_trade_pct=1.0, max_position_pct=20.0,
+        )
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["shares"], 1000)        # 10,000원 리스크 / 10원 손절폭
+        self.assertFalse(out["capped"])
+        self.assertEqual(out["position_pct"], 10.0)  # 100,000 / 1,000,000
+
+    def test_capped_by_max_position(self):
+        out = analyzer.position_size(
+            entry_price=100, stop_loss=99, account_equity=1_000_000,
+            risk_per_trade_pct=1.0, max_position_pct=20.0,
+        )
+        self.assertTrue(out["ok"])
+        self.assertTrue(out["capped"])
+        self.assertEqual(out["shares"], 2000)        # 최대비중 20% = 200,000 / 100원
+        self.assertEqual(out["position_pct"], 20.0)
+
+    def test_no_stop_is_not_ok(self):
+        out = analyzer.position_size(100, None, 1_000_000)
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["shares"], 0)
+
+    def test_stop_above_entry_is_not_ok(self):
+        out = analyzer.position_size(100, 105, 1_000_000)
+        self.assertFalse(out["ok"])
+
+    def test_tiny_account_one_share_exceeds_risk(self):
+        out = analyzer.position_size(
+            entry_price=100, stop_loss=50, account_equity=1000,
+            risk_per_trade_pct=1.0,
+        )
+        self.assertFalse(out["ok"])
+        self.assertIn("1주", out["note"])
+
+
+class HoldingsMonitorTests(unittest.TestCase):
+    def _analysis(self, last_close, action="중립", total=0):
+        return {
+            "last_close": last_close, "total": total, "name": "테스트",
+            "trade_plan": {"action": action},
+        }
+
+    def _levels(self, ev):
+        return {a["level"] for a in ev["alerts"]}
+
+    def test_stop_breach_raises_high_alert(self):
+        holding = {"quantity": 10, "avg_price": 100, "stop_loss": 95}
+        ev = holdings_monitor.evaluate_holding("X", "테스트", holding, self._analysis(94))
+        self.assertIn("high", self._levels(ev))
+        self.assertTrue(any("손절" in a["msg"] for a in ev["alerts"]))
+
+    def test_default_stop_used_when_no_stop_stored(self):
+        # 손절선 미저장 → 평단 -8% = 92 기준. 91이면 손절 조건.
+        holding = {"quantity": 10, "avg_price": 100}
+        ev = holdings_monitor.evaluate_holding("X", "테스트", holding, self._analysis(91))
+        self.assertIn("high", self._levels(ev))
+        self.assertTrue(any("기본 손절선" in a["msg"] for a in ev["alerts"]))
+
+    def test_target_reached_is_info_not_high(self):
+        holding = {"quantity": 10, "avg_price": 100, "target_1r": 110}
+        ev = holdings_monitor.evaluate_holding("X", "테스트", holding, self._analysis(112))
+        self.assertIn("info", self._levels(ev))
+        self.assertNotIn("high", self._levels(ev))
+        self.assertTrue(any("1R 목표" in a["msg"] for a in ev["alerts"]))
+
+    def test_trailing_stop_medium_alert(self):
+        holding = {"quantity": 10, "avg_price": 100, "peak_price": 130}
+        ev = holdings_monitor.evaluate_holding(
+            "X", "테스트", holding, self._analysis(117), trail_pct=10.0,
+        )
+        self.assertIn("medium", self._levels(ev))
+        self.assertTrue(any("고점 대비" in a["msg"] for a in ev["alerts"]))
+
+    def test_risk_signal_deterioration(self):
+        holding = {"quantity": 10, "avg_price": 100}
+        ev = holdings_monitor.evaluate_holding(
+            "X", "테스트", holding, self._analysis(100, action="위험 우세", total=-3),
+        )
+        self.assertIn("medium", self._levels(ev))
+        self.assertTrue(any("근거 약화" in a["msg"] for a in ev["alerts"]))
+
+    def test_healthy_holding_no_alerts(self):
+        holding = {"quantity": 10, "avg_price": 100, "stop_loss": 95,
+                   "target_1r": 200, "peak_price": 120}
+        ev = holdings_monitor.evaluate_holding(
+            "X", "테스트", holding, self._analysis(120, action="긍정 우세", total=5),
+        )
+        self.assertEqual(ev["alerts"], [])
+
+
+class RiskSettingsTests(unittest.TestCase):
+    def test_load_settings_fills_defaults_and_coerces_types(self):
+        with patch.object(portfolio.cloud_store, "load", return_value={"account_equity": "5000000"}):
+            s = portfolio.load_settings()
+        self.assertEqual(s["account_equity"], 5_000_000)        # 문자열 → int
+        self.assertEqual(s["risk_per_trade_pct"], 1.0)          # 기본값 채움
+        self.assertEqual(s["max_position_pct"], 20.0)
 
 
 if __name__ == "__main__":

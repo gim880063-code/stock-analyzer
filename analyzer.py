@@ -851,6 +851,75 @@ def build_trade_plan(
     }
 
 
+def position_size(
+    entry_price: float,
+    stop_loss: float | None,
+    account_equity: float,
+    risk_per_trade_pct: float = 1.0,
+    max_position_pct: float = 20.0,
+) -> dict:
+    """
+    리스크 기반 매수 수량 제안 (정보용 — 매수 추천 아님).
+
+    핵심 아이디어: '한 번의 매매에서 계좌의 risk_per_trade_pct% 만 잃도록' 손절폭으로
+    수량을 역산. 동시에 한 종목 비중이 max_position_pct% 를 넘지 않게 상한.
+    예) 계좌 1000만, 리스크 1%(=10만), 손절폭 5% → 손절 시 10만만 잃는 수량.
+
+    반환: shares, position_value, position_pct, risk_amount, per_share_risk,
+          capped(bool, 최대비중 상한 적용 여부), ok(bool), note(str)
+    """
+    out = {
+        "shares": 0, "position_value": 0.0, "position_pct": 0.0,
+        "risk_amount": 0.0, "per_share_risk": None,
+        "capped": False, "ok": False, "note": "",
+    }
+    if not entry_price or entry_price <= 0 or not account_equity or account_equity <= 0:
+        out["note"] = "투자금 또는 현재가 정보가 없어 수량을 계산할 수 없습니다."
+        return out
+    if stop_loss is None or stop_loss >= entry_price:
+        out["note"] = "손절가가 없거나 현재가 이상이라 리스크 기반 수량을 낼 수 없습니다."
+        return out
+
+    per_share_risk = entry_price - stop_loss
+    risk_amount = account_equity * risk_per_trade_pct / 100.0
+    raw_shares = int(risk_amount // per_share_risk)
+
+    # 한 종목 최대 비중 상한
+    max_value = account_equity * max_position_pct / 100.0
+    max_shares_by_cap = int(max_value // entry_price)
+
+    capped = False
+    shares = raw_shares
+    if raw_shares > max_shares_by_cap:
+        shares = max_shares_by_cap
+        capped = True
+
+    if shares < 1:
+        out["per_share_risk"] = round(per_share_risk, 2)
+        out["risk_amount"] = round(risk_amount, 0)
+        out["note"] = (
+            "이 손절폭에선 1주만 사도 리스크 한도를 넘습니다. "
+            "리스크 비율을 높이거나 손절폭이 더 좁은 종목을 고려하세요."
+        )
+        return out
+
+    position_value = shares * entry_price
+    out.update({
+        "shares": shares,
+        "position_value": round(position_value, 0),
+        "position_pct": round(position_value / account_equity * 100, 1),
+        "risk_amount": round(shares * per_share_risk, 0),
+        "per_share_risk": round(per_share_risk, 2),
+        "capped": capped,
+        "ok": True,
+        "note": (
+            f"한 종목 최대 비중 {max_position_pct:.0f}% 상한이 적용됐습니다."
+            if capped else f"계좌의 약 {risk_per_trade_pct:.1f}% 리스크 기준입니다."
+        ),
+    })
+    return out
+
+
 def recompute_score_after_deep(result: dict) -> None:
     """
     깊이 분석이 공시 카테고리를 바꿨을 수 있으니 종합점수·의견을 재계산.
