@@ -109,6 +109,7 @@ DEFAULT_SETTINGS = {
     "risk_per_trade_pct": 1.0,    # 한 종목 매매에서 감수할 계좌 대비 손실 비율(%)
     "max_position_pct": 20.0,     # 한 종목 최대 비중(%)
     "trail_pct": 10.0,            # 트레일링 스톱: 고점 대비 하락 임계(%)
+    "round_trip_cost_pct": 0.5,   # 왕복 거래비용(수수료+매도세+슬리피지) — 검증 net 수익용
 }
 
 

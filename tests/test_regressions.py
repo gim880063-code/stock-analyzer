@@ -410,6 +410,19 @@ class RiskSettingsTests(unittest.TestCase):
         self.assertEqual(s["account_equity"], 5_000_000)        # 문자열 → int
         self.assertEqual(s["risk_per_trade_pct"], 1.0)          # 기본값 채움
         self.assertEqual(s["max_position_pct"], 20.0)
+        self.assertEqual(s["round_trip_cost_pct"], 0.5)        # 신규 기본값
+
+
+class VerifierNetReturnTests(unittest.TestCase):
+    def test_net_return_subtracts_round_trip_cost(self):
+        import verifier
+        self.assertEqual(verifier.net_return(5.0, 0.5), 4.5)
+        self.assertEqual(verifier.net_return(0.3, 0.5), -0.2)   # 작은 수익은 비용에 먹힘
+        self.assertEqual(verifier.net_return(-2.0, 0.5), -2.5)
+
+    def test_net_return_ignores_negative_cost(self):
+        import verifier
+        self.assertEqual(verifier.net_return(5.0, -1.0), 5.0)   # 음수 비용은 0 취급
 
 
 if __name__ == "__main__":
