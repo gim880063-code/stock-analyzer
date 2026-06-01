@@ -2648,6 +2648,87 @@ if st.session_state.get("_view_mode") == "verifier":
             })
         return pd.DataFrame(rows)
 
+    # ─── 결과를 쉬운 말 한 줄 결론으로 ───
+    # 표의 숫자를 비전문가도 바로 이해하게 "그래서 점수 높을 때 사면 이익?" 에
+    # 답하는 문장을 자동 생성. 보수적으로 — 표본 적으면 단정 금지.
+    def _emit_verdict(level: str, msg: str) -> None:
+        {"success": st.success, "warning": st.warning, "info": st.info}.get(
+            level, st.info
+        )(msg)
+
+    def _verdict_scout(result: dict) -> tuple[str, str]:
+        n = result["total_count"]
+        if n == 0:
+            return ("info",
+                "📌 아직 검증할 종목이 없어요. 사이드바에서 **🔍 발굴**을 한 번 돌리고 "
+                "며칠 지나면 여기에 '점수가 수익으로 이어졌는지' 결과가 쌓입니다.")
+        if n < 5:
+            return ("warning",
+                f"📌 지금은 검증된 종목이 **{n}개뿐**이라 결론 내기엔 일러요. "
+                "10개 이상 쌓이면 훨씬 믿을 만한 답이 됩니다.")
+
+        buckets = result["bucket_stats"]
+        top = next((v for k, v in buckets.items() if k.startswith("상위")), None)
+        bot = next((v for k, v in buckets.items() if k.startswith("하위")), None)
+
+        if (top and bot and top["avg_return"] is not None
+                and bot["avg_return"] is not None):
+            diff = top["avg_return"] - bot["avg_return"]
+            ex = ""
+            if top.get("avg_excess") is not None and top["avg_excess"] > 0:
+                ex = f" (시장 대비로도 +{top['avg_excess']:.1f}%p)"
+            if diff > 0.5 and top["avg_return"] > 0:
+                return ("success",
+                    f"📌 **점수가 높을수록 실제로 더 올랐어요.** 점수 상위 그룹은 "
+                    f"평균 **{top['avg_return']:+.1f}%** (승률 {top['win_rate']}%){ex}로, "
+                    f"하위 그룹({bot['avg_return']:+.1f}%)보다 {diff:.1f}%p 앞섰습니다. "
+                    "→ 종합점수가 높을 때 사는 게 지금까지는 통했다는 신호입니다. "
+                    "단, 과거 결과일 뿐 미래를 보장하진 않아요.")
+            if diff > 0:
+                return ("info",
+                    f"📌 점수 상위 그룹(평균 {top['avg_return']:+.1f}%)이 "
+                    f"하위({bot['avg_return']:+.1f}%)보다 조금 나았지만 차이가 작아요"
+                    f"({diff:.1f}%p). 방향은 맞지만 '확실히 통한다'고 보긴 일러요.")
+            return ("warning",
+                f"📌 **아직은 점수가 높다고 더 오르진 않았어요.** 상위 그룹 평균 "
+                f"{top['avg_return']:+.1f}%, 하위 그룹 {bot['avg_return']:+.1f}%. "
+                "표본을 더 쌓아 보거나 점수 기준을 다시 볼 필요가 있습니다.")
+
+        avg = result["overall_avg"]
+        win = result["overall_win_rate"]
+        if avg is not None:
+            tail = (
+                "점수 구간을 상/하위로 나눌 만큼 점수가 다양하지 않아 "
+                "그룹 비교는 아직 못 합니다."
+            )
+            if avg > 0:
+                return ("info",
+                    f"📌 검증된 {n}개 종목의 평균 수익률은 **{avg:+.1f}%** "
+                    f"(승률 {win}%)예요. {tail}")
+            return ("warning",
+                f"📌 검증된 {n}개 종목의 평균이 {avg:+.1f}%로 부진해요. {tail}")
+        return ("info", "📌 결과를 계산했지만 요약할 수치가 부족합니다.")
+
+    def _verdict_item(item_result: dict) -> tuple[str, str]:
+        n = item_result["total_samples"]
+        if n == 0:
+            return ("info",
+                "📌 아직 항목별로 따질 데이터가 없어요. 매일 분석이 며칠 쌓이면 "
+                "어떤 항목이 진짜 잘 맞는지 보입니다.")
+        if n < 20:
+            return ("warning",
+                f"📌 표본이 **{n}개**로 적어요. 항목별 예측력은 참고만 하세요.")
+        for it in item_result["ranked_items"]:
+            sp = item_result["item_stats"][it]["predictive_spread"]
+            if sp is not None:
+                if sp > 0:
+                    return ("success",
+                        f"📌 지금까지 가장 잘 맞은 항목은 **'{it}'** 예요. 이 점수가 "
+                        f"높을 때가 낮을 때보다 평균 {sp:.1f}%p 더 올랐습니다.")
+                break
+        return ("info",
+            "📌 아직 어떤 항목도 뚜렷한 예측력을 보이진 않아요. 데이터가 더 필요합니다.")
+
     # ─── 탭 1: 발굴 가상 수익률 ───
     with tab_scout:
         col_score, col_horizon = st.columns([2, 1])
@@ -2702,6 +2783,9 @@ if st.session_state.get("_view_mode") == "verifier":
             horizon=horizon,
             min_hold_days=min_hold_days,
         )
+
+        _lvl, _msg = _verdict_scout(result)
+        _emit_verdict(_lvl, _msg)
 
         if result["total_count"] == 0:
             short_hold = result.get("excluded_short_hold", 0)
@@ -2805,6 +2889,10 @@ if st.session_state.get("_view_mode") == "verifier":
             index=0,
         )
         item_result = verifier.verify_item_scores(forward_days=forward_days)
+
+        _lvl_i, _msg_i = _verdict_item(item_result)
+        _emit_verdict(_lvl_i, _msg_i)
+
         st.caption(
             f"전체 샘플 {item_result['total_samples']:,}건 "
             f"(종목×시점 페어, 항목별 점수 기록이 있는 일자만)"
