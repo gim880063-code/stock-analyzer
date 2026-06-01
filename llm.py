@@ -78,7 +78,12 @@ def _get_client() -> genai.Client:
         key = _get_api_key()
         if not key:
             raise RuntimeError("GEMINI_API_KEY가 설정되지 않았습니다.")
-        _client = genai.Client(api_key=key)
+        # timeout(ms) — 응답이 멈춘 호출이 워커를 무한 점유해 스크리닝이
+        # 몇 시간씩 끝나지 않던 문제 방지. Flash 호출은 보통 1~5초.
+        _client = genai.Client(
+            api_key=key,
+            http_options=types.HttpOptions(timeout=30_000),
+        )
     return _client
 
 
@@ -188,11 +193,46 @@ JSON 형식으로만 응답:
 }}"""
 
 
+# ─── rate-limit 서킷 브레이커 ──────────────────────────────────────────
+# 무료 일일 한도가 소진되면 모든 호출이 429 → 매번 최대 ~90초 재시도를 반복해
+# 유니버스 전체(safe 는 100종목+)가 몇 시간씩 걸린다. 연속 rate-limit 이 임계를
+# 넘으면 한동안 LLM 호출을 즉시 포기(룰 기반 분류로 graceful fallback)해 런이 빨리 끝나게 한다.
+_rl_lock = threading.Lock()
+_rl_consecutive = 0
+_rl_tripped_until = 0.0
+_RL_TRIP_THRESHOLD = 6      # 연속 rate-limit 최종 실패 횟수
+_RL_COOLDOWN = 600.0        # 트립 후 LLM 호출을 건너뛸 시간(초)
+
+
+class RateLimitExhausted(RuntimeError):
+    """일일 한도 소진 추정 — 이번 런에서는 LLM 호출을 건너뜀."""
+
+
+def _rl_should_skip() -> bool:
+    with _rl_lock:
+        return time.time() < _rl_tripped_until
+
+
+def _rl_record(success: bool) -> None:
+    global _rl_consecutive, _rl_tripped_until
+    with _rl_lock:
+        if success:
+            _rl_consecutive = 0
+        else:
+            _rl_consecutive += 1
+            if _rl_consecutive >= _RL_TRIP_THRESHOLD:
+                _rl_tripped_until = time.time() + _RL_COOLDOWN
+
+
 def _safe_call(model: str, prompt: str, temperature: float = 0.2, max_retries: int = 3) -> dict:
     """
     LLM 호출 + 429 (rate limit) 자동 retry.
     Gemini가 "retry in Xs" 힌트를 주면 그만큼 기다리고, 없으면 지수 백오프.
+    한도 소진이 연속되면 서킷 브레이커가 트립돼 즉시 RateLimitExhausted 를 던진다.
     """
+    if _rl_should_skip():
+        raise RateLimitExhausted("Gemini 일일 한도 소진 추정 — LLM 호출 건너뜀")
+
     client = _get_client()
     last_error: Exception | None = None
     for attempt in range(max_retries):
@@ -205,12 +245,18 @@ def _safe_call(model: str, prompt: str, temperature: float = 0.2, max_retries: i
                     temperature=temperature,
                 ),
             )
-            return json.loads(response.text)
+            result = json.loads(response.text)
+            _rl_record(success=True)
+            return result
         except Exception as e:
             last_error = e
             err_str = str(e)
             is_rate_limit = "429" in err_str or "RESOURCE_EXHAUSTED" in err_str
-            if not is_rate_limit or attempt >= max_retries - 1:
+            # rate limit 이 아닌 오류(타임아웃·파싱 등)는 즉시 포기 — 워커 점유 방지
+            if not is_rate_limit:
+                raise
+            if attempt >= max_retries - 1:
+                _rl_record(success=False)   # 한도 소진 신호 누적 → 임계 넘으면 트립
                 raise
             # 권장 retry 시간 파싱 (예: "retry in 29.1s")
             m = re.search(r"retry in (\d+(?:\.\d+)?)s", err_str)
