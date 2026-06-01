@@ -1,10 +1,11 @@
-name: Daily auto-screen (16:00 KST)
+name: Daily auto-screen (16:12 KST)
 
-# 매일 평일 16:00 KST = 07:00 UTC. 한국 장 마감(15:30) 30분 후라 거래대금/수급
-# 데이터가 안정적으로 채워진 시점. 주말·공휴일에 fire 돼도 데이터는 동일하므로 무해.
+# 매일 평일 16:12 KST = 07:12 UTC. 한국 장 마감(15:30) 후라 거래대금/수급 데이터가
+# 안정적으로 채워진 시점. 정각(:00)은 전 세계 cron이 몰려 GitHub Actions 가 자주
+# 지연·드롭하므로 일부러 :12 로 비켜 둠. 주말·공휴일에 fire 돼도 데이터 동일하므로 무해.
 on:
   schedule:
-    - cron: '0 7 * * 1-5'
+    - cron: '12 7 * * 1-5'
   workflow_dispatch:
     inputs:
       universe:
