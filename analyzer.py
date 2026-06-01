@@ -629,6 +629,66 @@ def score_market_regime(code: str) -> ScoreItem | None:
     return {"name": "시장 국면", "score": score, "msg": msg, "max": 1}
 
 
+# ─── 시장 리스크오프 스위치 (하락장 방어) ───
+# KOSPI가 장기 이동평균(기본 200일) 아래면 '위험 회피' 국면으로 보고 신규 진입
+# 기준점수를 높여 추세에 맞서는 매수를 줄인다. 개인의 큰 손실을 막는 핵심 한 수.
+@lru_cache(maxsize=2)
+def _kospi_series_for_regime(date_key: str):
+    try:
+        end = datetime.now()
+        start = end - timedelta(days=420)   # MA200 계산엔 ~285 거래일 필요
+        idx = fdr.DataReader("KS11", start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"))
+        if idx is None or idx.empty:
+            return None
+        return idx["Close"].dropna().astype(float)
+    except Exception:
+        return None
+
+
+def _regime_from_series(close, ma_window: int = 200) -> dict:
+    """종가 시리즈로 리스크오프 여부 판정 — 네트워크 없는 순수 함수(테스트용)."""
+    if close is None or len(close) < 60:
+        return {"risk_off": False, "label": "판단 보류 (데이터 부족)",
+                "ma_window": ma_window, "gap_pct": None, "close": None, "ma": None}
+    if len(close) < ma_window:
+        ma_window = 60   # MA200 불가 시 보조로 60일선
+    last = float(close.iloc[-1])
+    ma = float(close.rolling(ma_window).mean().iloc[-1])
+    gap = (last / ma - 1) * 100 if ma > 0 else 0.0
+    risk_off = last < ma
+    label = (
+        f"위험 회피 국면 — KOSPI가 {ma_window}일선 아래 ({gap:+.1f}%)" if risk_off
+        else f"정상 국면 — KOSPI가 {ma_window}일선 위 ({gap:+.1f}%)"
+    )
+    return {"risk_off": risk_off, "label": label, "ma_window": ma_window,
+            "gap_pct": round(gap, 2), "close": round(last, 2), "ma": round(ma, 2)}
+
+
+def market_regime_state(ma_window: int = 200) -> dict:
+    """KOSPI 장기 이동평균 기준 시장 국면. 하루 1회 fetch 캐시."""
+    series = _kospi_series_for_regime(datetime.now().strftime("%Y-%m-%d"))
+    return _regime_from_series(series, ma_window)
+
+
+def effective_min_score(base_min: int, regime: dict | None = None,
+                        settings: dict | None = None) -> tuple[int, int]:
+    """리스크오프 + 활성화 시 진입 기준점수를 boost 만큼 상향. (effective_min, boost) 반환."""
+    if settings is None:
+        try:
+            import portfolio
+            settings = portfolio.load_settings()
+        except Exception:
+            settings = {}
+    if not settings.get("risk_off_enabled", True):
+        return base_min, 0
+    if regime is None:
+        regime = market_regime_state()
+    if regime.get("risk_off"):
+        boost = int(settings.get("risk_off_score_boost", 2) or 0)
+        return base_min + boost, boost
+    return base_min, 0
+
+
 def score_alignment_risk(scores: list[dict]) -> ScoreItem | None:
     """다중 정렬 페널티 — 단기 신호가 동시에 +로 정렬되면 정점 매수 가능성.
 

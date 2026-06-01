@@ -13,7 +13,7 @@ from streamlit_autorefresh import st_autorefresh
 
 from analyzer import (
     KOREAN_NAMES, UNIVERSE_LABELS, all_korean_stocks, analyze,
-    get_universe_codes, position_size,
+    get_universe_codes, market_regime_state, position_size,
 )
 import dart
 import holdings_monitor
@@ -408,11 +408,23 @@ with st.sidebar:
             value=float(_rs.get("round_trip_cost_pct", 0.5)), key="rs_cost",
             help="매매수수료+매도세+슬리피지 합산. 검증 화면의 '비용 차감 수익'에 사용. 보통 0.3~0.5%.",
         )
+        _ro_on = st.checkbox(
+            "하락장 방어 (코스피 200일선 아래면 진입 기준 상향)",
+            value=bool(_rs.get("risk_off_enabled", True)), key="rs_ro_on",
+            help="하락 추세에선 좋은 점수 종목도 같이 빠지기 쉬워, 신규 진입 기준점수를 높입니다.",
+        )
+        _ro_boost = st.number_input(
+            "하락장 진입 기준 가산점", min_value=0, max_value=10, step=1,
+            value=int(_rs.get("risk_off_score_boost", 2)), key="rs_ro_boost",
+            help="리스크오프 때 min_score 에 더할 점수. 클수록 더 엄격(=후보 적어짐).",
+        )
         if st.button("설정 저장", key="rs_save", use_container_width=True):
             port.save_settings({
                 "account_equity": _eq, "risk_per_trade_pct": _risk,
                 "max_position_pct": _maxpos, "trail_pct": _trail,
                 "round_trip_cost_pct": _cost,
+                "risk_off_enabled": _ro_on,
+                "risk_off_score_boost": _ro_boost,
             })
             st.success("리스크 설정 저장됨")
             st.rerun()
@@ -460,6 +472,19 @@ with st.sidebar:
     st.divider()
     st.subheader("🔍 종목 발굴 (스크리닝)")
     st.caption("종합점수 높은 종목을 자동 검색")
+    try:
+        _regime = market_regime_state()
+        if _regime.get("risk_off"):
+            _rs_now = port.load_settings()
+            if _rs_now.get("risk_off_enabled", True):
+                st.warning(
+                    f"🛡️ {_regime['label']} — 신규 진입 기준 "
+                    f"+{int(_rs_now.get('risk_off_score_boost', 2))}점 상향 적용 중"
+                )
+            else:
+                st.caption(f"🛡️ {_regime['label']} (하락장 방어 꺼짐)")
+    except Exception:
+        pass
 
     universe = st.selectbox(
         "유니버스",
@@ -1856,6 +1881,16 @@ def _screen_worker(runner: dict, stock_dict_local: dict[str, str]) -> None:
             })
             continue
         fresh_results.append(r)
+
+    # 하락장 리스크오프 — KOSPI가 200일선 아래면 진입 기준 상향 (auto_screen 과 동일)
+    from analyzer import market_regime_state as _mrs, effective_min_score
+    _base_min = min_score
+    regime = _mrs()
+    min_score, _ro_boost = effective_min_score(_base_min, regime=regime)
+    runner["regime"] = regime
+    runner["min_score_base"] = _base_min
+    runner["min_score_effective"] = min_score
+    runner["risk_off_boost"] = _ro_boost
 
     fresh_results.sort(key=lambda r: r.get("total", -999), reverse=True)
     results = [r for r in fresh_results if r.get("total", -999) >= min_score]

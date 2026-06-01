@@ -411,6 +411,8 @@ class RiskSettingsTests(unittest.TestCase):
         self.assertEqual(s["risk_per_trade_pct"], 1.0)          # 기본값 채움
         self.assertEqual(s["max_position_pct"], 20.0)
         self.assertEqual(s["round_trip_cost_pct"], 0.5)        # 신규 기본값
+        self.assertEqual(s["risk_off_enabled"], True)
+        self.assertEqual(s["risk_off_score_boost"], 2)
 
 
 class VerifierNetReturnTests(unittest.TestCase):
@@ -423,6 +425,33 @@ class VerifierNetReturnTests(unittest.TestCase):
     def test_net_return_ignores_negative_cost(self):
         import verifier
         self.assertEqual(verifier.net_return(5.0, -1.0), 5.0)   # 음수 비용은 0 취급
+
+
+class MarketRegimeTests(unittest.TestCase):
+    def _series(self, values):
+        return pd.Series([float(v) for v in values])
+
+    def test_risk_off_when_below_long_ma(self):
+        s = self._series([120] * 200 + [90])
+        self.assertTrue(analyzer._regime_from_series(s)["risk_off"])
+
+    def test_risk_on_when_above_long_ma(self):
+        s = self._series([100] * 200 + [120])
+        self.assertFalse(analyzer._regime_from_series(s)["risk_off"])
+
+    def test_insufficient_data_holds_judgement(self):
+        r = analyzer._regime_from_series(self._series([1, 2, 3]))
+        self.assertFalse(r["risk_off"])
+        self.assertIn("보류", r["label"])
+
+    def test_effective_min_score_raises_only_when_risk_off_and_enabled(self):
+        on = {"risk_off_enabled": True, "risk_off_score_boost": 2}
+        self.assertEqual(analyzer.effective_min_score(5, {"risk_off": True}, on), (7, 2))
+        self.assertEqual(analyzer.effective_min_score(5, {"risk_off": False}, on), (5, 0))
+        self.assertEqual(
+            analyzer.effective_min_score(5, {"risk_off": True}, {"risk_off_enabled": False}),
+            (5, 0),
+        )
 
 
 if __name__ == "__main__":

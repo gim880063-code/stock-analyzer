@@ -110,6 +110,8 @@ DEFAULT_SETTINGS = {
     "max_position_pct": 20.0,     # 한 종목 최대 비중(%)
     "trail_pct": 10.0,            # 트레일링 스톱: 고점 대비 하락 임계(%)
     "round_trip_cost_pct": 0.5,   # 왕복 거래비용(수수료+매도세+슬리피지) — 검증 net 수익용
+    "risk_off_enabled": True,     # 하락장(코스피<200일선)에 신규 진입 기준 상향
+    "risk_off_score_boost": 2,    # 리스크오프 시 min_score 에 더할 점수
 }
 
 
