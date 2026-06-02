@@ -117,6 +117,14 @@ class ScoringTests(unittest.TestCase):
         self.assertLessEqual(item["score"], 0)
         self.assertIn("과매도", item["msg"])
 
+    def test_momentum_neutralized_in_total_score(self):
+        # 모멘텀(RSI)은 의심 항목 + 역방향 IC(2026-06) 로 종합점수 가중치 0 (관찰용).
+        # +1 모멘텀을 더해도 총점·max 가 변하지 않아야 한다.
+        self.assertEqual(analyzer.SCORE_WEIGHTS["모멘텀"], 0)
+        base = [{"name": "추세", "score": 1, "max": 1}]
+        with_mom = base + [{"name": "모멘텀", "score": 1, "max": 1}]
+        self.assertEqual(analyzer.weighted_score(with_mom), analyzer.weighted_score(base))
+
     def test_opinion_text_stays_advisory_not_prescriptive(self):
         # 앱 철학: 매수/매도 추천 아님. 처방형("매수하세요") 금지, 서술형 유지.
         positive = analyzer.overall_opinion(8, 15)
