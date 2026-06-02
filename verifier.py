@@ -52,6 +52,10 @@ DEFAULT_MIN_HOLD_DAYS = 5
 # 짧은 보유 신호의 작은 초과수익은 이 비용에 먹히므로 net(비용 차감) 수익을 함께 본다.
 DEFAULT_ROUND_TRIP_COST_PCT = 0.5
 
+# 항목별 rank-IC(순위상관) 를 보고할 최소 관측치. 이보다 적으면 IC=None 처리한다
+# (점수가 -1/0/+1 같은 거친 정수라, 표본이 적으면 상관계수가 크게 요동침).
+IC_MIN_OBS = 30
+
 
 def net_return(gross_pct: float, round_trip_cost_pct: float) -> float:
     """총수익률에서 왕복 거래비용을 차감한 net 수익률 (음수 비용은 0 취급)."""
@@ -467,58 +471,104 @@ def verify_scouted(
 
 
 # ─────────── 항목별 점수 예측력 ───────────
-def verify_item_scores(forward_days: int = 5) -> dict:
+def _spearman_ic(xs: list[float], ys: list[float]) -> float | None:
+    """순위상관(rank-IC). 순위로 바꾼 뒤 Pearson = Spearman 정의 → scipy 불필요(무료·로컬).
+
+    표본(IC_MIN_OBS 미만)·분산(x가 모두 같음) 부족하면 None.
+    """
+    if len(xs) < IC_MIN_OBS or len(set(xs)) < 2:
+        return None
+    try:
+        rx = pd.Series(xs, dtype="float64").rank()
+        ry = pd.Series(ys, dtype="float64").rank()
+        ic = rx.corr(ry)   # 기본 pearson — 순위에 적용하면 Spearman 과 동일(동점 보정 포함)
+    except Exception:
+        return None
+    if ic is None or ic != ic:   # NaN 방어
+        return None
+    return round(float(ic), 3)
+
+
+def verify_item_scores(forward_days: int = 5, use_excess: bool = True) -> dict:
     """
     history 기반 항목별 점수 → forward_days 영업일 뒤 수익률 분석.
 
-    개편 (2026-05):
-      이전 로직은 같은 종목의 history 엔트리 인덱스 차이로 forward return 을
-      계산해서, 매일 분석을 안 돌리면 forward_days 갭이 안 채워져 거의 0건이었음.
-      이제 점수 기록일을 anchor 로 잡고, FinanceDataReader 가격으로 정확히
-      forward_days 영업일 뒤 종가를 가져와 forward return 계산.
+    각 항목(추세·수급·거래량·공시 …) 점수가 실제로 수익을 예측했는지 두 가지로 본다:
+      - rank_ic: 항목 점수와 forward 수익률의 순위상관(Spearman). +면 점수 높을수록
+        더 오름(예측력 있음), −면 거꾸로, 0 근처면 무의미. use_excess=True 면
+        시장(KOSPI/KOSDAQ) 대비 초과수익 기준 — 추세장에 모든 항목이 좋아 보이는
+        착시를 제거한다. (예측력 판단의 주 지표)
+      - predictive_spread: (양수 점수일 때 평균수익) − (음수 점수일 때 평균수익), 절대수익.
 
-    forward_days: 5(단기) / 20(중기) / 60(장기) 권장.
+    개편 (2026-05): 점수 기록일을 anchor 로 잡고 FinanceDataReader 가격으로 정확히
+    forward_days 영업일 뒤 종가를 가져와 forward return 계산.
+    rank-IC·초과수익 추가 (2026-06): 예측력을 더 정직하게 측정.
+
+    forward_days: 5(단기) / 20(중기) / 60(장기). 데이터 기간이 짧으면 20·60일은
+    완성된 관측이 거의 없다(반환의 n_dates 로 표본 기간 확인).
     """
     all_hist = history.load_all()
     today = _today_key()
 
     per_item: dict[str, dict[int, list[float]]] = defaultdict(lambda: defaultdict(list))
+    ic_x: dict[str, list[int]] = defaultdict(list)      # 항목 점수
+    ic_y: dict[str, list[float]] = defaultdict(list)    # forward 수익(초과수익 옵션)
     sample_count = 0
+    dates_seen: set[str] = set()
+    stocks_seen: set[str] = set()
+
+    market_cache: dict[str, "pd.Series | None"] = {}
+
+    def _market(market: str):
+        if market not in market_cache:
+            market_cache[market] = _fetch_market_series(market, today) if use_excess else None
+        return market_cache[market]
 
     for code, entries in all_hist.items():
         if not entries:
             continue
-
         series = _fetch_close_series(code, today)
         if series is None or series.empty:
             continue
+        mser = _market(_safe_market_for_code(code))
 
-        # 날짜순 정렬 (저장 시 정렬되지만 안전을 위해)
-        entries_sorted = sorted(entries, key=lambda e: e.get("date", ""))
-        for e in entries_sorted:
+        for e in sorted(entries, key=lambda e: e.get("date", "")):
             scores = e.get("scores")
             if not scores:
                 continue
             anchor_date = e.get("date")
             if not anchor_date:
                 continue
-
             start_idx = _find_idx_on_or_after(series, anchor_date)
             if start_idx is None:
                 continue
             end_idx = start_idx + forward_days
             if end_idx >= len(series):
                 continue
-
             start_close = float(series.iloc[start_idx])
             end_close = float(series.iloc[end_idx])
             if start_close <= 0:
                 continue
-
             ret = (end_close / start_close - 1) * 100
+
+            # 시장 대비 초과수익 (같은 날짜 anchor + 같은 forward_days)
+            signal_ret = ret
+            if use_excess and mser is not None and not mser.empty:
+                m_start = _find_idx_on_or_after(mser, anchor_date)
+                if m_start is not None and m_start + forward_days < len(mser):
+                    m_s = float(mser.iloc[m_start])
+                    m_e = float(mser.iloc[m_start + forward_days])
+                    if m_s > 0:
+                        signal_ret = ret - (m_e / m_s - 1) * 100
+
             sample_count += 1
+            dates_seen.add(anchor_date)
+            stocks_seen.add(code)
             for item_name, item_score in scores.items():
-                per_item[item_name][int(item_score)].append(ret)
+                iv = int(item_score)
+                per_item[item_name][iv].append(ret)
+                ic_x[item_name].append(iv)
+                ic_y[item_name].append(signal_ret)
 
     item_stats: dict[str, dict] = {}
     for item, score_map in per_item.items():
@@ -542,18 +592,26 @@ def verify_item_scores(forward_days: int = 5) -> dict:
         item_stats[item] = {
             "by_score": by_score,
             "predictive_spread": spread,
+            "rank_ic": _spearman_ic(ic_x[item], ic_y[item]),
+            "n": len(ic_x[item]),
             "total_samples": sum(len(rs) for rs in score_map.values()),
         }
 
-    ranked_items = sorted(
-        item_stats.keys(),
-        key=lambda k: (item_stats[k]["predictive_spread"] or -999),
-        reverse=True,
-    )
+    def _rank_key(k):
+        ic = item_stats[k]["rank_ic"]
+        if ic is not None:
+            return (1, ic)
+        sp = item_stats[k]["predictive_spread"]
+        return (0, sp if sp is not None else -999)
+
+    ranked_items = sorted(item_stats.keys(), key=_rank_key, reverse=True)
 
     return {
         "item_stats": item_stats,
         "ranked_items": ranked_items,
         "forward_days": forward_days,
+        "use_excess": use_excess,
         "total_samples": sample_count,
+        "n_dates": len(dates_seen),
+        "n_stocks": len(stocks_seen),
     }

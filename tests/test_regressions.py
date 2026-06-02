@@ -18,6 +18,7 @@ import dart  # noqa: E402
 import holdings_monitor  # noqa: E402
 import llm  # noqa: E402
 import portfolio  # noqa: E402
+import verifier  # noqa: E402
 
 
 class _Response:
@@ -452,6 +453,31 @@ class MarketRegimeTests(unittest.TestCase):
             analyzer.effective_min_score(5, {"risk_off": True}, {"risk_off_enabled": False}),
             (5, 0),
         )
+
+
+class ItemICTests(unittest.TestCase):
+    """rank-IC(순위상관) 계산기 검증 — verify_item_scores 항목별 예측력의 핵심."""
+
+    def test_perfect_monotonic(self):
+        xs = [1, 2, 3, 4, 5] * 10
+        self.assertEqual(verifier._spearman_ic(xs, xs), 1.0)
+        self.assertEqual(verifier._spearman_ic(xs, [5, 4, 3, 2, 1] * 10), -1.0)
+
+    def test_ties_handled(self):
+        # 거친 정수 점수(-1/0/+1)도 완전 단조면 동점 보정 후 +1
+        xs = [-1, 0, 1] * 20
+        self.assertEqual(verifier._spearman_ic(xs, xs), 1.0)
+
+    def test_insufficient_returns_none(self):
+        self.assertIsNone(verifier._spearman_ic([1, 2] * 5, [1, 2] * 5))   # 표본 < IC_MIN_OBS
+        self.assertIsNone(verifier._spearman_ic([1] * 40, list(range(40))))  # x 분산 없음
+
+    def test_noise_near_zero(self):
+        xs = list(range(60))
+        ys = [(i * 37) % 11 for i in range(60)]   # 사실상 무관
+        ic = verifier._spearman_ic(xs, ys)
+        self.assertIsNotNone(ic)
+        self.assertLess(abs(ic), 0.3)
 
 
 if __name__ == "__main__":

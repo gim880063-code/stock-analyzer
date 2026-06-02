@@ -2708,16 +2708,17 @@ if st.session_state.get("_view_mode") == "verifier":
             return ("info",
                 "📌 아직 검증할 종목이 없어요. 사이드바에서 **🔍 발굴**을 한 번 돌리고 "
                 "며칠 지나면 여기에 '점수가 수익으로 이어졌는지' 결과가 쌓입니다.")
-        if n < 5:
+        if n < 10:
             return ("warning",
-                f"📌 지금은 검증된 종목이 **{n}개뿐**이라 결론 내기엔 일러요. "
-                "10개 이상 쌓이면 훨씬 믿을 만한 답이 됩니다.")
+                f"📌 지금은 검증된 종목이 **{n}개뿐**이라 결론 내기엔 매우 일러요. "
+                "수십 개 이상 쌓이고 몇 달 지나야 믿을 만한 답이 됩니다.")
 
         buckets = result["bucket_stats"]
         top = next((v for k, v in buckets.items() if k.startswith("상위")), None)
         bot = next((v for k, v in buckets.items() if k.startswith("하위")), None)
 
-        if (top and bot and top["avg_return"] is not None
+        # 점수 구간(상위/하위) 비교는 구간당 표본이 충분해야 의미 → 전체 40개 이상에서만.
+        if (n >= 40 and top and bot and top["avg_return"] is not None
                 and bot["avg_return"] is not None):
             diff = top["avg_return"] - bot["avg_return"]
             ex = ""
@@ -2744,8 +2745,8 @@ if st.session_state.get("_view_mode") == "verifier":
         win = result["overall_win_rate"]
         if avg is not None:
             tail = (
-                "점수 구간을 상/하위로 나눌 만큼 점수가 다양하지 않아 "
-                "그룹 비교는 아직 못 합니다."
+                "아직 표본이 적어(또는 점수가 다양하지 않아) 점수 구간별 "
+                "상/하위 비교는 보류합니다 — 수십 개 이상 쌓여야 합니다."
             )
             if avg > 0:
                 return ("info",
@@ -2757,23 +2758,36 @@ if st.session_state.get("_view_mode") == "verifier":
 
     def _verdict_item(item_result: dict) -> tuple[str, str]:
         n = item_result["total_samples"]
+        n_dates = item_result.get("n_dates", 0)
         if n == 0:
             return ("info",
                 "📌 아직 항목별로 따질 데이터가 없어요. 매일 분석이 며칠 쌓이면 "
                 "어떤 항목이 진짜 잘 맞는지 보입니다.")
-        if n < 20:
+        # rank-IC 는 표본·기간이 충분해야 신뢰. 점수가 거친 정수라 더 보수적으로 본다.
+        if n < 100 or n_dates < 15:
             return ("warning",
-                f"📌 표본이 **{n}개**로 적어요. 항목별 예측력은 참고만 하세요.")
-        for it in item_result["ranked_items"]:
-            sp = item_result["item_stats"][it]["predictive_spread"]
-            if sp is not None:
-                if sp > 0:
-                    return ("success",
-                        f"📌 지금까지 가장 잘 맞은 항목은 **'{it}'** 예요. 이 점수가 "
-                        f"높을 때가 낮을 때보다 평균 {sp:.1f}%p 더 올랐습니다.")
-                break
+                f"📌 표본이 아직 적어요(관측 {n:,}건·기간 {n_dates}일). 항목별 예측력은 "
+                "**방향만 참고**하시고 숫자는 믿지 마세요. 몇 달 더 쌓여야 신뢰할 만합니다.")
+        ics = [(it, item_result["item_stats"][it]["rank_ic"])
+               for it in item_result["ranked_items"]
+               if item_result["item_stats"][it]["rank_ic"] is not None]
+        if not ics:
+            return ("info",
+                "📌 아직 어떤 항목도 예측력 통계(IC)를 낼 만큼 표본이 안 모였어요.")
+        best_it, best_ic = ics[0]
+        worst_it, worst_ic = ics[-1]
+        if best_ic >= 0.05:
+            extra = ""
+            if worst_ic <= -0.05:
+                extra = (f" 반대로 **'{worst_it}'**(IC {worst_ic:+.2f})는 거꾸로 작동하는 편이라 "
+                         "비중 축소 후보예요.")
+            return ("success",
+                f"📌 예측력이 가장 좋은 항목은 **'{best_it}'**(IC {best_ic:+.2f})예요 "
+                f"— IC가 +면 그 점수 높을수록 시장보다 더 올랐다는 뜻.{extra} "
+                f"단, 표본 기간이 {n_dates}일로 아직 짧아 잠정 결과입니다.")
         return ("info",
-            "📌 아직 어떤 항목도 뚜렷한 예측력을 보이진 않아요. 데이터가 더 필요합니다.")
+            f"📌 아직 어떤 항목도 뚜렷한 예측력(IC≥0.05)을 못 보였어요(최고 '{best_it}' "
+            f"IC {best_ic:+.2f}). 신호가 약하거나 데이터가 더 필요합니다.")
 
     # ─── 탭 1: 발굴 가상 수익률 ───
     with tab_scout:
@@ -2943,9 +2957,9 @@ if st.session_state.get("_view_mode") == "verifier":
     # ─── 탭 2: 항목별 예측력 ───
     with tab_item:
         st.caption(
-            "각 항목 점수가 며칠 뒤 수익률을 얼마나 잘 예측했는지. "
-            "spread = (양수 점수 평균 수익률) − (음수 점수 평균 수익률). "
-            "+면 항목이 예측력 있음, −면 반대로 작동, 0 근처면 무의미."
+            "각 항목 점수가 며칠 뒤 **시장 대비** 수익률을 얼마나 잘 예측했는지. "
+            "**IC**(순위상관)가 주 지표 — +면 점수 높을수록 더 오름(예측력 있음), "
+            "−면 거꾸로 작동, 0 근처면 무의미. (보조 지표 spread = 양수점수 평균 − 음수점수 평균)"
         )
         forward_days = st.radio(
             "예측 기간",
@@ -2961,8 +2975,10 @@ if st.session_state.get("_view_mode") == "verifier":
         _emit_verdict(_lvl_i, _msg_i)
 
         st.caption(
-            f"전체 샘플 {item_result['total_samples']:,}건 "
-            f"(종목×시점 페어, 항목별 점수 기록이 있는 일자만)"
+            f"전체 관측 {item_result['total_samples']:,}건 · 기간 {item_result.get('n_dates', 0)}일 · "
+            f"종목 {item_result.get('n_stocks', 0)}개 "
+            f"({'시장 대비 초과수익' if item_result.get('use_excess') else '절대수익'} 기준). "
+            "기간이 짧으면 같은 종목의 겹치는 구간이 많아 실제 유효 표본은 더 작습니다."
         )
 
         if item_result["total_samples"] == 0:
@@ -2977,20 +2993,19 @@ if st.session_state.get("_view_mode") == "verifier":
                 st_ = item_result["item_stats"][item]
                 spread_rows.append({
                     "항목": item,
-                    "예측력 spread(%p)": st_["predictive_spread"] if st_["predictive_spread"] is not None else "-",
-                    "샘플 수": st_["total_samples"],
+                    "예측력 IC": st_["rank_ic"] if st_.get("rank_ic") is not None else "표본부족",
+                    "spread(%p)": st_["predictive_spread"] if st_["predictive_spread"] is not None else "-",
+                    "관측 수": st_.get("n", st_["total_samples"]),
                 })
-            st.markdown(f"##### 항목별 예측력 ({forward_days}일 뒤 수익률 기준)")
+            st.markdown(f"##### 항목별 예측력 ({forward_days}일 뒤, 시장 대비 기준)")
             st.dataframe(pd.DataFrame(spread_rows), hide_index=True, use_container_width=True)
 
             st.markdown("##### 항목 상세 — 점수값별 수익률")
             for item in ranked:
                 st_ = item_result["item_stats"][item]
-                with st.expander(
-                    f"{item}  (spread {st_['predictive_spread']:+.2f}%p, "
-                    f"{st_['total_samples']}건)" if st_["predictive_spread"] is not None
-                    else f"{item}  ({st_['total_samples']}건)"
-                ):
+                _ic = st_.get("rank_ic")
+                _ic_txt = f"IC {_ic:+.2f}" if _ic is not None else "IC 표본부족"
+                with st.expander(f"{item}  ({_ic_txt}, {st_.get('n', st_['total_samples'])}건)"):
                     rows = []
                     for score_val, stat in st_["by_score"].items():
                         rows.append({
