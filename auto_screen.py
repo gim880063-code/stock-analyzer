@@ -25,6 +25,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from analyzer import (
+    SCREEN_MIN_SCORE,
     analyze,
     enrich_with_deep_analysis,
     get_universe_codes,
@@ -236,7 +237,7 @@ def run(universe: str, min_score: int, deep: bool, workers: int) -> dict:
 def _parse_args(argv: list[str]) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="헤드리스 자동 스크리닝")
     p.add_argument("--universe", default="safe", choices=["safe", "kospi_30", "kospi_50"])
-    p.add_argument("--min-score", type=int, default=5)
+    # 기준점수는 코드 고정(analyzer.SCREEN_MIN_SCORE) — CLI 로 고르지 않음.
     p.add_argument(
         "--no-deep", action="store_true",
         help="2단계 LLM 깊이 분석 생략 (빠름, 정확도 약간 떨어짐)",
@@ -255,7 +256,7 @@ def main() -> int:
 
     result = run(
         universe=args.universe,
-        min_score=args.min_score,
+        min_score=SCREEN_MIN_SCORE,
         deep=not args.no_deep,
         workers=args.workers,
     )

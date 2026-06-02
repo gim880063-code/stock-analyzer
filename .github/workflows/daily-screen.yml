@@ -20,10 +20,6 @@ on:
         description: '유니버스 (safe / kospi_30 / kospi_50)'
         required: false
         default: 'safe'
-      min_score:
-        description: '최소 종합점수'
-        required: false
-        default: '5'
       deep:
         description: 'LLM 본문 깊이 분석 여부'
         required: false
@@ -108,9 +104,9 @@ jobs:
           PYTHONUNBUFFERED: '1'
         run: |
           UNIVERSE="${{ github.event.inputs.universe || 'safe' }}"
-          MIN_SCORE="${{ github.event.inputs.min_score || '5' }}"
           DEEP_FLAG=""
           if [ "${{ github.event.inputs.deep || 'true' }}" = "false" ]; then
             DEEP_FLAG="--no-deep"
           fi
-          python auto_screen.py --universe "$UNIVERSE" --min-score "$MIN_SCORE" $DEEP_FLAG
+          # 기준 종합점수는 코드 고정(analyzer.SCREEN_MIN_SCORE) — 워크플로 입력 없음.
+          python auto_screen.py --universe "$UNIVERSE" $DEEP_FLAG

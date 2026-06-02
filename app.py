@@ -12,7 +12,7 @@ import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
 from analyzer import (
-    KOREAN_NAMES, UNIVERSE_LABELS, all_korean_stocks, analyze,
+    KOREAN_NAMES, SCREEN_MIN_SCORE, UNIVERSE_LABELS, all_korean_stocks, analyze,
     get_universe_codes, market_regime_state, position_size,
 )
 import dart
@@ -494,7 +494,12 @@ with st.sidebar:
         help="🛡️ 안전 유니버스 = 시총 5조+ / 거래대금 500억+ / 관리종목 등 제외 — 작전주 위험 낮은 후보들",
     )
 
-    min_score = st.slider("최소 종합점수", -15, 15, 4, 1, key="screen_min_score")
+    # 기준 종합점수는 코드에 고정(analyzer.SCREEN_MIN_SCORE) — 사용자가 매번 고르지 않음.
+    min_score = SCREEN_MIN_SCORE
+    st.caption(
+        f"📌 기준 종합점수 **{SCREEN_MIN_SCORE}점 이상** 자동 적용 "
+        f"(하락장에선 자동 상향). 점수 기준은 시스템이 관리합니다."
+    )
 
     # 시간 추정 — KRX 종목 목록 서버가 불안정해도 앱 전체가 멈추지 않도록 보호
     try:
