@@ -49,6 +49,85 @@ class CloudStoreTests(unittest.TestCase):
             cloud_store._gist_cache = old_cache
             cloud_store.DATA_DIR = old_data_dir
 
+    def test_fetch_keeps_last_good_on_failure_and_refetches_after_ttl(self):
+        """캐시 TTL 만료 후 재조회가 실패해도 직전 정상본을 유지(빈 값 오염 금지)."""
+        old_cache, old_at, old_ttl = (
+            cloud_store._gist_cache,
+            cloud_store._gist_cache_at,
+            cloud_store._CACHE_TTL_SEC,
+        )
+        try:
+            cloud_store._gist_cache = None
+            cloud_store._gist_cache_at = 0.0
+            cloud_store._CACHE_TTL_SEC = 60.0
+            calls = {"n": 0}
+
+            class _Ok:
+                ok = True
+
+                def json(self):
+                    return {"files": {"scouted.json": {"content": '{"005930": {}}'}}}
+
+            class _Fail:
+                ok = False
+                status_code = 500
+                text = "err"
+
+            def fake_get(*a, **k):
+                calls["n"] += 1
+                return _Ok() if calls["n"] == 1 else _Fail()
+
+            with (
+                patch.object(cloud_store, "_get_credentials", return_value=("pat", "gist")),
+                patch.object(cloud_store.requests, "get", side_effect=fake_get),
+            ):
+                first = cloud_store._fetch_gist_files()
+                self.assertIn("scouted.json", first)
+                cloud_store._fetch_gist_files()          # TTL 안 — 재조회 없음
+                self.assertEqual(calls["n"], 1)
+                cloud_store._gist_cache_at = 0.0         # TTL 만료 강제
+                third = cloud_store._fetch_gist_files()  # 재조회 시도 → 실패
+                self.assertEqual(calls["n"], 2)
+                self.assertIn("scouted.json", third)     # 직전 정상본 유지
+        finally:
+            cloud_store._gist_cache = old_cache
+            cloud_store._gist_cache_at = old_at
+            cloud_store._CACHE_TTL_SEC = old_ttl
+
+    def test_refresh_false_when_unreadable_true_when_ok(self):
+        """refresh(): 원격을 못 읽으면 False(→ 호출측이 덮어쓰기 보류), 읽히면 True."""
+        old_cache, old_at = cloud_store._gist_cache, cloud_store._gist_cache_at
+        try:
+            class _Ok:
+                ok = True
+
+                def json(self):
+                    return {"files": {}}
+
+            class _Fail:
+                ok = False
+                status_code = 500
+                text = "err"
+
+            cloud_store._gist_cache = None
+            cloud_store._gist_cache_at = 0.0
+            with (
+                patch.object(cloud_store, "_get_credentials", return_value=("pat", "gist")),
+                patch.object(cloud_store.requests, "get", return_value=_Fail()),
+            ):
+                self.assertFalse(cloud_store.refresh())
+
+            cloud_store._gist_cache = None
+            cloud_store._gist_cache_at = 0.0
+            with (
+                patch.object(cloud_store, "_get_credentials", return_value=("pat", "gist")),
+                patch.object(cloud_store.requests, "get", return_value=_Ok()),
+            ):
+                self.assertTrue(cloud_store.refresh())
+        finally:
+            cloud_store._gist_cache = old_cache
+            cloud_store._gist_cache_at = old_at
+
 
 class DartTests(unittest.TestCase):
     def test_income_statement_prefers_cumulative_amounts_when_available(self):

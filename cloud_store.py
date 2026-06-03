@@ -14,6 +14,7 @@ Gist 미설정 시 로컬 파일로 fallback (개발 환경 등).
 import json
 import os
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +28,11 @@ GIST_API = "https://api.github.com/gists"
 
 _lock = threading.Lock()
 _gist_cache: dict[str, str] | None = None
+_gist_cache_at: float = 0.0          # _gist_cache 를 마지막으로 확정한 시각 (monotonic)
+# Gist 읽기 캐시 수명(초). 배포 앱처럼 오래 떠 있는 프로세스가, 매일밤 자동
+# 스크리닝(GitHub Actions)이 Gist 를 갱신해도 다시 안 읽어 옛 화면이 남던 문제를
+# 막는다 — 늦어도 이 시간 안에 최신본을 자동 반영.
+_CACHE_TTL_SEC: float = 60.0
 _sync_log: list[str] = []  # 최근 동기화 결과 (성공·실패 모두) — 진단용
 
 
@@ -77,14 +83,22 @@ def is_configured() -> bool:
 
 
 def _fetch_gist_files() -> dict[str, str]:
-    """Gist의 모든 파일 내용을 가져옴. 세션당 1회만 fetch (cache)."""
-    global _gist_cache
+    """Gist의 모든 파일 내용을 가져옴.
+
+    캐시는 _CACHE_TTL_SEC 동안만 유효 — 만료되면 다시 읽어, 외부(GitHub Actions)가
+    갱신한 최신본을 오래 떠 있는 배포 앱이 자동으로 반영한다.
+    읽기에 실패하면 캐시를 '빈 값'으로 덮어쓰지 않고 직전 정상본을 유지한다
+    (빈 값으로 오염되면 read-modify-write 시 원격 데이터가 통째로 날아갈 수 있음).
+    """
+    global _gist_cache, _gist_cache_at
     with _lock:
-        if _gist_cache is not None:
+        now = time.monotonic()
+        if _gist_cache is not None and (now - _gist_cache_at) < _CACHE_TTL_SEC:
             return _gist_cache
         pat, gist_id = _get_credentials()
         if not (pat and gist_id):
             _gist_cache = {}
+            _gist_cache_at = now
             return _gist_cache
         try:
             r = requests.get(
@@ -96,14 +110,14 @@ def _fetch_gist_files() -> dict[str, str]:
                 timeout=10,
             )
             if not r.ok:
-                _gist_cache = {}
-                return _gist_cache
+                # 일시적 실패 — 직전 정상본 유지(없으면 이번 호출만 빈 값).
+                return _gist_cache if _gist_cache is not None else {}
             files = r.json().get("files", {})
             _gist_cache = {name: f.get("content", "") for name, f in files.items()}
+            _gist_cache_at = now
             return _gist_cache
         except Exception:
-            _gist_cache = {}
-            return _gist_cache
+            return _gist_cache if _gist_cache is not None else {}
 
 
 def _invalidate_cache():
@@ -114,10 +128,26 @@ def _invalidate_cache():
 
 def _remember_cached_file(filename: str, content: str) -> None:
     """Keep current-session reads consistent when a later Gist PATCH fails."""
-    global _gist_cache
+    global _gist_cache, _gist_cache_at
     with _lock:
         if _gist_cache is not None:
             _gist_cache = {**_gist_cache, filename: content}
+            _gist_cache_at = time.monotonic()
+
+
+def refresh() -> bool:
+    """원격 Gist 를 강제로 다시 읽어 캐시를 최신화한다.
+
+    확정된 원격 상태를 확보하면 True, 설정 안 됨/읽기 실패면 False.
+    스크리닝처럼 read-modify-write 로 원격을 덮어쓰기 전에 호출해서, '원격을
+    못 읽은 채 빈 데이터로 덮어써 유실'되는 사고를 막는 프리플라이트로 쓴다.
+    """
+    if not is_configured():
+        return False
+    _invalidate_cache()
+    _fetch_gist_files()
+    with _lock:
+        return _gist_cache is not None
 
 
 def load(filename: str, default: Any) -> Any:
@@ -175,7 +205,9 @@ def save(filename: str, data: Any) -> None:
         )
         if r.ok:
             _log(f"✅ {filename} → Gist ({len(content)} bytes)")
-            _invalidate_cache()
+            # 방금 쓴 내용으로 캐시를 갱신(빈 값 None 으로 두지 않음) — 직후 read 가
+            # 잠깐의 재조회 실패로 빈 데이터를 받아 다음 save 가 덮어쓰는 걸 막는다.
+            _remember_cached_file(filename, content)
         else:
             _log(f"❌ {filename} HTTP {r.status_code}: {r.text[:150]}")
             _remember_cached_file(filename, content)

@@ -59,6 +59,13 @@ def run(universe: str, min_score: int, deep: bool, workers: int) -> dict:
     started = time.time()
     _log(f"start — universe={universe} min_score={min_score} deep={deep} workers={workers}")
 
+    # 프리플라이트: Gist 가 설정돼 있으면 '읽기'가 되는지 먼저 확인한다.
+    # 못 읽는 상태에서 분석 후 저장하면 read-modify-write 가 빈 데이터로 원격을
+    # 통째 덮어써 발굴·점수·스크리닝 이력이 날아갈 수 있다(과거 실제 유실 사례).
+    if cloud_store.is_configured() and not cloud_store.refresh():
+        _log("FATAL: Gist 현재 상태를 읽지 못함 — 데이터 유실 방지 위해 이번 실행 중단")
+        return {"status": "error", "error": "gist preflight failed"}
+
     try:
         codes = get_universe_codes(universe)
     except Exception as e:
