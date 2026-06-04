@@ -303,6 +303,7 @@ def verify_scouted(
     horizon: str = "all",
     min_hold_days: int = DEFAULT_MIN_HOLD_DAYS,
     round_trip_cost_pct: float | None = None,
+    kind: str = "picked",
 ) -> dict:
     """
     발굴 종목들의 발굴 후 수익률 통계.
@@ -348,6 +349,10 @@ def verify_scouted(
     missing_data_count = 0
 
     for code, info in items.items():
+        # kind 필터 — 기본 'picked'(통과 발굴)만. observed(관찰)가 섞여 통과 종목
+        # 성과 통계가 희석되지 않게 분리한다. "all" 이면 둘 다 포함.
+        if kind != "all" and scouted._entry_kind(info) != kind:
+            continue
         added_at = info.get("added_at")
         if not added_at:
             missing_data_count += 1

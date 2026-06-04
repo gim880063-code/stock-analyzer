@@ -1777,12 +1777,65 @@ def _render_screen_diagnostics(runner: dict) -> None:
             f"(이미 추적 중 {scouted_skipped or 0}개는 건너뜀)."
         )
 
+    # 과열장 적응 통과 + 모멘텀 후보 — 통과 0개여도 시뮬에 쌓이고 주도주를 보여준다.
+    if runner.get("overheated"):
+        def _oh_rows(items):
+            out = []
+            for r in items:
+                metrics = (r.get("recent_surge") or {}).get("metrics") or {}
+                rel = next((s.get("relative") for s in (r.get("scores") or [])
+                            if s.get("name") == "시장 상대강도"), None)
+                out.append({
+                    "종목": f'{r.get("name", "")}({r.get("code", "")})',
+                    "종합점수": r.get("total"),
+                    "20일(%)": metrics.get("d20"),
+                    "시장대비(%p)": rel,
+                    "종가": r.get("last_close"),
+                })
+            return out
+
+        adaptive_picks = runner.get("adaptive_picks") or []
+        obs_added = runner.get("observed_added")
+        picks = runner.get("momentum_picks") or []
+
+        # (1) 실제 통과 — 수익률 게이트(시장대비 5~25%p·거래량·펀더)를 통과한 적응 통과
+        if adaptive_picks:
+            st.success(
+                f"✅ **과열장 적응 통과 {len(adaptive_picks)}개** — 시장 대비 초과가 적정"
+                "(5~25%p)하고 거래량·펀더가 받쳐주는 건전 주도주입니다. 점수 시뮬레이션엔 "
+                "일반 통과와 **분리(adaptive)** 기록돼 따로 검증됩니다(손절 전제)."
+            )
+            st.dataframe(
+                pd.DataFrame(_oh_rows(adaptive_picks)),
+                hide_index=True, use_container_width=True,
+            )
+        elif obs_added:
+            st.info(
+                f"🔭 이번엔 게이트를 통과한 적응 통과는 없지만, 관찰용으로 "
+                f"**{obs_added}개**를 점수 시뮬레이션에 기록했습니다 (데이터 끊김 방지)."
+            )
+
+        # (2) 참고용 — 통과엔 못 들었지만 급등 중인 나머지 주도주(관찰)
+        adaptive_codes = {a.get("code") for a in adaptive_picks}
+        ref_picks = [r for r in picks if r.get("code") not in adaptive_codes]
+        if ref_picks:
+            st.markdown("#### 📈 과열장 모멘텀 후보 (참고용 · 자동 매수 아님)")
+            st.caption(
+                "통과 게이트엔 못 들었지만 급등 중인 주도주입니다. 추격 매수는 평균 회귀 "
+                "위험이 크니 손절 전제로만 참고하세요. 관찰로 시뮬레이션에 기록됩니다."
+            )
+            st.dataframe(
+                pd.DataFrame(_oh_rows(ref_picks)),
+                hide_index=True, use_container_width=True,
+            )
+
     log_to_show = captured_log or live_log
     with st.expander("🔍 진단: 저장 상태 / Gist 동기화 로그", expanded=bool(save_err) or save_ok is None or bool(scouted_err)):
         st.markdown(
             f"- `save_ok` (screening_history) = `{save_ok}`\n"
             f"- `save_error` = `{save_err}`\n"
             f"- `scouted_added` = `{scouted_added}`, `scouted_skipped` = `{scouted_skipped}`\n"
+            f"- `observed_added` = `{runner.get('observed_added')}`, `overheated` = `{runner.get('overheated')}`\n"
             f"- `scouted_error` = `{scouted_err}`\n"
             f"- 마지막 `stage` = `{stage}`\n"
             f"- Gist `is_configured()` (메인 스레드 기준) = `{gist_configured}`\n"
@@ -1888,7 +1941,12 @@ def _screen_worker(runner: dict, stock_dict_local: dict[str, str]) -> None:
         fresh_results.append(r)
 
     # 하락장 리스크오프 — KOSPI가 200일선 아래면 진입 기준 상향 (auto_screen 과 동일)
-    from analyzer import market_regime_state as _mrs, effective_min_score
+    from analyzer import (
+        market_regime_state as _mrs,
+        effective_min_score,
+        select_observation_targets,
+        select_adaptive_picks,
+    )
     _base_min = min_score
     regime = _mrs()
     min_score, _ro_boost = effective_min_score(_base_min, regime=regime)
@@ -1997,6 +2055,39 @@ def _screen_worker(runner: dict, stock_dict_local: dict[str, str]) -> None:
         runner["scouted_skipped"] = skipped
     except Exception as e:
         runner["scouted_error"] = f"{type(e).__name__}: {e}"
+
+    # 과열장 적응 통과(adaptive) + 관찰(observed) — 통과 0개여도 시뮬 데이터가 끊기지 않게.
+    runner["adaptive_added"] = None
+    runner["adaptive_picks"] = []
+    runner["observed_added"] = None
+    runner["observed_error"] = None
+    runner["overheated"] = bool(regime.get("overheated"))
+    runner["momentum_picks"] = []
+    passed_codes = {r.get("code") for r in results}
+
+    # 과열장 적응 통과 — 시장 대비 초과가 적정한 건전 주도주를 소수 통과(수익률 게이트).
+    try:
+        adaptive = select_adaptive_picks(screened, regime, passed_codes=passed_codes)
+        ad_added, _ad_skip = scouted.add_adaptive_from_analysis(adaptive, universe=universe)
+        runner["adaptive_added"] = ad_added
+        runner["adaptive_picks"] = adaptive
+        passed_codes |= {r.get("code") for r in adaptive}
+    except Exception as e:
+        runner["adaptive_error"] = f"{type(e).__name__}: {e}"
+
+    try:
+        obs = select_observation_targets(
+            screened, fresh_results, regime, passed_codes=passed_codes,
+        )
+        obs_added, _obs_skip = scouted.add_observed_from_analysis(obs, universe=universe)
+        runner["observed_added"] = obs_added
+        # 과열장 주도주(모멘텀 후보)만 UI 표시용으로 추림 — 관찰 대상 중 surge 인 것.
+        if regime.get("overheated"):
+            runner["momentum_picks"] = [
+                r for r in obs if (r.get("recent_surge") or {}).get("is_surge")
+            ]
+    except Exception as e:
+        runner["observed_error"] = f"{type(e).__name__}: {e}"
     try:
         import cloud_store as _cs
         runner["sync_log"] = _cs.get_sync_log()[-15:]
@@ -2838,10 +2929,30 @@ if st.session_state.get("_view_mode") == "verifier":
                 help="발굴 직후 종목은 신호가 작동할 시간이 없어 통계에 노이즈를 만듦.",
             )
 
+        track = st.radio(
+            "추적 종류",
+            options=["picked", "adaptive", "observed", "all"],
+            format_func=lambda k: {
+                "picked": "발굴(통과) — 정상장 매수 후보",
+                "adaptive": "과열장 적응 통과 — 시장대비 게이트 통과",
+                "observed": "관찰 — 통과 못 했지만 추적",
+                "all": "전체",
+            }[k],
+            horizontal=True,
+            key="sim_kind",
+            help=(
+                "발굴: 정상장에서 종합점수 기준을 통과해 가상 매수한 종목. "
+                "과열장 적응 통과: 과열장에서 시장 대비 초과·거래량·펀더 게이트를 통과한 주도주. "
+                "관찰: 통과 못 했지만 점수 검증용으로 추적하는 종목. "
+                "서로 섞으면 성과가 희석되므로 기본은 '발굴'만 봅니다."
+            ),
+        )
+
         result = verifier.verify_scouted(
             score_type=score_type,
             horizon=horizon,
             min_hold_days=min_hold_days,
+            kind=track,
         )
 
         _lvl, _msg = _verdict_scout(result)

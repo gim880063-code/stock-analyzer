@@ -30,6 +30,8 @@ from analyzer import (
     enrich_with_deep_analysis,
     get_universe_codes,
     recompute_score_after_deep,
+    select_observation_targets,
+    select_adaptive_picks,
 )
 import cloud_store
 import history
@@ -203,6 +205,31 @@ def run(universe: str, min_score: int, deep: bool, workers: int) -> dict:
         _log(f"scouted 저장 실패: {type(e).__name__}: {e}")
         added, skipped = 0, 0
 
+    passed_codes = {r.get("code") for r in candidates}
+
+    # 과열장 적응 통과(adaptive) — 시장 대비 초과가 적정한 건전 주도주를 소수 통과시킨다.
+    # 절대 급등이 아니라 '시장 대비'로 위험을 재 통과 0개를 막되 추격 매수는 배제.
+    adaptive_added = 0
+    try:
+        adaptive = select_adaptive_picks(screened, regime, passed_codes=passed_codes)
+        adaptive_added, _ad_skip = scouted.add_adaptive_from_analysis(adaptive, universe=universe)
+        passed_codes |= {r.get("code") for r in adaptive}
+        _log(f"과열장 적응 통과: {len(adaptive)}개 선정, +{adaptive_added} 기록")
+    except Exception as e:
+        _log(f"적응 통과 기록 실패: {type(e).__name__}: {e}")
+
+    # 관찰(observed) 기록 — 통과 0개여도 점수 검증 데이터가 끊기지 않게.
+    # 과열장에선 surge 로 제외된 주도주도 모멘텀 후보로 함께 추적한다(매수 추천 아님).
+    obs_added = 0
+    try:
+        obs = select_observation_targets(
+            screened, fresh, regime, passed_codes=passed_codes,
+        )
+        obs_added, obs_skipped = scouted.add_observed_from_analysis(obs, universe=universe)
+        _log(f"관찰: 대상 {len(obs)}개 중 +{obs_added} 기록 ({obs_skipped} 이미 추적 중)")
+    except Exception as e:
+        _log(f"관찰 기록 실패: {type(e).__name__}: {e}")
+
     # 보유 종목 청산 점검 — 매수 발굴과 대칭으로 '나갈 때'도 매일 점검
     try:
         import holdings_monitor
@@ -237,6 +264,8 @@ def run(universe: str, min_score: int, deep: bool, workers: int) -> dict:
         "candidates": len(candidates),
         "scouted_added": added,
         "scouted_skipped": skipped,
+        "adaptive_added": adaptive_added,
+        "observed_added": obs_added,
         "elapsed_sec": round(elapsed, 1),
     }
 

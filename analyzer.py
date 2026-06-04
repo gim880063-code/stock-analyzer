@@ -601,7 +601,8 @@ def score_market_relative(df: pd.DataFrame, code: str) -> ScoreItem | None:
         score, label = 0, f"시장 대비 {relative:+.1f}%p 중립"
 
     msg = f"{label} (20일, 종목 {stock_ret:+.1f}% vs {market} {market_ret:+.1f}%)"
-    return {"name": "시장 상대강도", "score": score, "msg": msg, "max": 1}
+    return {"name": "시장 상대강도", "score": score, "msg": msg, "max": 1,
+            "relative": round(relative, 1)}
 
 
 def score_market_regime(code: str) -> ScoreItem | None:
@@ -661,10 +662,16 @@ def _kospi_series_for_regime(date_key: str):
         return None
 
 
+# 과열(overheated) 판정 임계 — KOSPI가 장기선 대비 이만큼 위면 '단기 추격 주의' 국면.
+# risk_off(아래)와 독립이며, 과열이라고 진입 기준점수를 올리지는 않는다(관찰만 강화).
+OVERHEAT_GAP_PCT = 20.0
+
+
 def _regime_from_series(close, ma_window: int = 200) -> dict:
-    """종가 시리즈로 리스크오프 여부 판정 — 네트워크 없는 순수 함수(테스트용)."""
+    """종가 시리즈로 리스크오프/과열 국면 판정 — 네트워크 없는 순수 함수(테스트용)."""
     if close is None or len(close) < 60:
-        return {"risk_off": False, "label": "판단 보류 (데이터 부족)",
+        return {"risk_off": False, "overheated": False,
+                "label": "판단 보류 (데이터 부족)",
                 "ma_window": ma_window, "gap_pct": None, "close": None, "ma": None}
     if len(close) < ma_window:
         ma_window = 60   # MA200 불가 시 보조로 60일선
@@ -672,12 +679,16 @@ def _regime_from_series(close, ma_window: int = 200) -> dict:
     ma = float(close.rolling(ma_window).mean().iloc[-1])
     gap = (last / ma - 1) * 100 if ma > 0 else 0.0
     risk_off = last < ma
-    label = (
-        f"위험 회피 국면 — KOSPI가 {ma_window}일선 아래 ({gap:+.1f}%)" if risk_off
-        else f"정상 국면 — KOSPI가 {ma_window}일선 위 ({gap:+.1f}%)"
-    )
-    return {"risk_off": risk_off, "label": label, "ma_window": ma_window,
-            "gap_pct": round(gap, 2), "close": round(last, 2), "ma": round(ma, 2)}
+    overheated = gap >= OVERHEAT_GAP_PCT
+    if risk_off:
+        label = f"위험 회피 국면 — KOSPI가 {ma_window}일선 아래 ({gap:+.1f}%)"
+    elif overheated:
+        label = f"과열 국면 — KOSPI가 {ma_window}일선 +{gap:.1f}% (단기 추격 주의)"
+    else:
+        label = f"정상 국면 — KOSPI가 {ma_window}일선 위 ({gap:+.1f}%)"
+    return {"risk_off": risk_off, "overheated": overheated, "label": label,
+            "ma_window": ma_window, "gap_pct": round(gap, 2),
+            "close": round(last, 2), "ma": round(ma, 2)}
 
 
 def market_regime_state(ma_window: int = 200) -> dict:
@@ -703,6 +714,142 @@ def effective_min_score(base_min: int, regime: dict | None = None,
         boost = int(settings.get("risk_off_score_boost", 2) or 0)
         return base_min + boost, boost
     return base_min, 0
+
+
+# ─────────── 관찰(observed) 대상 선정 ───────────
+# 통과하지 못한 종목도 점수 검증 데이터로 추적하기 위해 매 스크리닝마다 상위를 골라낸다.
+# 과열장에선 surge 로 하드 제외된 '주도주'도 모멘텀 후보로 함께 관찰해, 보수 필터가
+# 과열장 수익 기회를 놓쳤는지(평균회귀로 맞았는지) 사후 검증한다. 매수 추천이 아니다.
+OBS_TOP_N = 5        # 미통과 점수 상위 관찰 수
+OBS_MOMENTUM_N = 5   # 과열장 주도주(모멘텀) 관찰 수
+
+
+def _find_score_item(result: dict, name: str) -> dict | None:
+    for s in (result.get("scores") or []):
+        if isinstance(s, dict) and s.get("name") == name:
+            return s
+    return None
+
+
+def select_observation_targets(
+    screened: list[dict],
+    fresh_results: list[dict],
+    regime: dict | None = None,
+    passed_codes: set | None = None,
+    *,
+    top_n: int = OBS_TOP_N,
+    mom_n: int = OBS_MOMENTUM_N,
+) -> list[dict]:
+    """관찰 대상 선정 — analyze result dict 리스트 반환(코드 기준 dedup).
+
+    (a) fresh_results(stale/surge 제외·점수순) 중 통과 못 한 상위 top_n
+    (b) regime['overheated'] 일 때만: screened 중 surge 로 제외됐지만 '주도주' 성격인
+        종목(시장 상대강도 ≥ 0 & 거래량 동반)을 20일 수익률 상위 mom_n
+
+    신규 분석 호출 없이 기존 result 필드(scores·recent_surge·total)만 사용한다.
+    """
+    passed = passed_codes or set()
+    seen: set = set()
+    targets: list[dict] = []
+
+    # (a) 미통과 점수 상위
+    for r in fresh_results:
+        if len(targets) >= top_n:
+            break
+        code = r.get("code")
+        if not code or code in passed or code in seen:
+            continue
+        seen.add(code)
+        targets.append(r)
+
+    # (b) 과열장 주도주 (모멘텀)
+    if regime and regime.get("overheated"):
+        leaders: list[tuple[float, dict]] = []
+        for r in screened:
+            code = r.get("code")
+            if not code or code in passed or code in seen:
+                continue
+            surge = r.get("recent_surge") or {}
+            if not surge.get("is_surge"):
+                continue
+            rel = _find_score_item(r, "시장 상대강도")
+            if rel is None or int(rel.get("score", 0)) < 0:
+                continue  # 시장을 못 이기는 급등은 추격 가치 낮음
+            risk = _find_score_item(r, "가격 리스크")
+            if risk and "미동반" in str(risk.get("msg") or ""):
+                continue  # 거래량 미동반 급등 제외 (컨빅션 약함)
+            d20 = (surge.get("metrics") or {}).get("d20")
+            leaders.append((float(d20) if d20 is not None else -999.0, r))
+        leaders.sort(key=lambda x: x[0], reverse=True)
+        for _, r in leaders[:mom_n]:
+            code = r.get("code")
+            if code in seen:
+                continue
+            seen.add(code)
+            targets.append(r)
+
+    return targets
+
+
+# ─────────── 과열장 적응형 통과 (adaptive picks) ───────────
+# 통과 0개 방지 + 수익률 방어. 위험을 절대 급등이 아니라 '시장 대비 초과(relative)'로
+# 측정한다: 시장을 적당히(REL_MIN~REL_MAX %p) 이기는 건전한 주도주만 소수 통과시키고,
+# 시장보다 과하게 탄 것·거래량 미동반·펀더 악화·RSI 극단은 배제한다(cross-sectional
+# 모멘텀). 점수 계산 로직(score_risk/surge)은 건드리지 않고 선정 레이어에서만 동작.
+REL_MIN_PCT = 5.0    # 시장을 이 정도는 이겨야 주도주 (상대강도 +1 임계와 동일)
+REL_MAX_PCT = 25.0   # 시장 대비 이 이상 초과 급등이면 추격 위험 — 제외
+ADAPTIVE_MAX_N = 3   # 과열장 적응 통과 최대 수 (소수 분산)
+
+
+def _fundamentals_ok(result: dict) -> bool:
+    """펀더가 망가지지 않았는지 — 재무 건전성 + 성장성 점수 합 ≥ 0."""
+    total = 0
+    for name in ("재무 건전성", "성장성"):
+        item = _find_score_item(result, name)
+        if item is not None:
+            total += int(item.get("score") or 0)
+    return total >= 0
+
+
+def select_adaptive_picks(
+    screened: list[dict],
+    regime: dict | None = None,
+    passed_codes: set | None = None,
+    *,
+    max_n: int = ADAPTIVE_MAX_N,
+) -> list[dict]:
+    """과열장 한정, 시장 대비 초과가 적정한 건전 주도주를 '통과(adaptive)'로 선정.
+
+    게이트(모두 충족): surge & 시장 상대강도 초과가 REL_MIN~REL_MAX %p & 거래량 동반 &
+    RSI 극단 아님 & 펀더 받침. 통과분을 종합점수(total) 내림차순 상위 max_n 반환.
+    신규 분석 호출 없이 기존 result 필드만 사용한다.
+    """
+    if not (regime and regime.get("overheated")):
+        return []
+    passed = passed_codes or set()
+    cand: list[dict] = []
+    for r in screened:
+        code = r.get("code")
+        if not code or code in passed:
+            continue
+        if not (r.get("recent_surge") or {}).get("is_surge"):
+            continue
+        rel_item = _find_score_item(r, "시장 상대강도")
+        if rel_item is None or rel_item.get("relative") is None:
+            continue
+        relative = float(rel_item["relative"])
+        if relative < REL_MIN_PCT or relative > REL_MAX_PCT:
+            continue  # 시장 못 이기거나(약세) 과하게 초과(추격 위험)
+        risk_msg = str((_find_score_item(r, "가격 리스크") or {}).get("msg") or "")
+        if "미동반" in risk_msg:
+            continue  # 거래량 미동반 — 컨빅션 약함
+        if "RSI" in risk_msg and "극단" in risk_msg:
+            continue  # RSI 극단 과열
+        if not _fundamentals_ok(r):
+            continue  # 펀더 악화
+        cand.append(r)
+    cand.sort(key=lambda r: r.get("total", -999), reverse=True)
+    return cand[:max_n]
 
 
 def score_alignment_risk(scores: list[dict]) -> ScoreItem | None:
