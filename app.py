@@ -443,21 +443,27 @@ with st.sidebar:
     st.divider()
     # 최근 스크리닝 실행 상태 — "오늘 돌았나?" 를 한눈에. (자동 스크리닝이 PC와
     # 무관하게 도는지 사용자가 직접 확인하는 용도. 날짜 키 존재 = 그날 실행됨.)
-    _last_run = screening_history.last_run()
-    if _last_run:
-        _when = (
-            f"{_last_run['ran_at']} KST" if _last_run.get("ran_at")
-            else _last_run["date"]
-        )
-        _passed = _last_run.get("passed_count", 0)
-        if _last_run.get("ran_today"):
-            st.success(f"🟢 오늘 스크리닝 완료 · {_when} · 통과 {_passed}개")
+    # 상태 위젯은 어떤 경우에도 앱 전체를 중단시키면 안 되므로 방어적으로 감싼다 —
+    # 예: 배포 직후 Streamlit 이 app.py 는 새로 실행했지만 import 된 모듈은 아직
+    # 옛 버전이라 신규 함수가 없는 과도기(AttributeError) 에도 조용히 넘어가게.
+    try:
+        _last_run = screening_history.last_run()
+        if _last_run:
+            _when = (
+                f"{_last_run['ran_at']} KST" if _last_run.get("ran_at")
+                else _last_run["date"]
+            )
+            _passed = _last_run.get("passed_count", 0)
+            if _last_run.get("ran_today"):
+                st.success(f"🟢 오늘 스크리닝 완료 · {_when} · 통과 {_passed}개")
+            else:
+                _ago = _last_run.get("days_ago")
+                _ago_txt = f" · {_ago}일 전" if isinstance(_ago, int) and _ago > 0 else ""
+                st.warning(f"🟡 마지막 스크리닝 {_when}{_ago_txt} · 통과 {_passed}개")
         else:
-            _ago = _last_run.get("days_ago")
-            _ago_txt = f" · {_ago}일 전" if isinstance(_ago, int) and _ago > 0 else ""
-            st.warning(f"🟡 마지막 스크리닝 {_when}{_ago_txt} · 통과 {_passed}개")
-    else:
-        st.caption("⚪ 아직 스크리닝 기록이 없습니다 — 자동 스크리닝이 한 번 돌면 표시됩니다")
+            st.caption("⚪ 아직 스크리닝 기록이 없습니다 — 자동 스크리닝이 한 번 돌면 표시됩니다")
+    except Exception:
+        pass  # 상태 표시 실패는 조용히 무시 — 사이드바 한 줄 때문에 앱이 죽지 않게
     recent_picks_count = screening_history.get_recent(days=90)
     if recent_picks_count:
         # 간단 통계
