@@ -441,6 +441,23 @@ with st.sidebar:
 
     # ─────────── 스크리닝 후보 진입점 (가벼움) ───────────
     st.divider()
+    # 최근 스크리닝 실행 상태 — "오늘 돌았나?" 를 한눈에. (자동 스크리닝이 PC와
+    # 무관하게 도는지 사용자가 직접 확인하는 용도. 날짜 키 존재 = 그날 실행됨.)
+    _last_run = screening_history.last_run()
+    if _last_run:
+        _when = (
+            f"{_last_run['ran_at']} KST" if _last_run.get("ran_at")
+            else _last_run["date"]
+        )
+        _passed = _last_run.get("passed_count", 0)
+        if _last_run.get("ran_today"):
+            st.success(f"🟢 오늘 스크리닝 완료 · {_when} · 통과 {_passed}개")
+        else:
+            _ago = _last_run.get("days_ago")
+            _ago_txt = f" · {_ago}일 전" if isinstance(_ago, int) and _ago > 0 else ""
+            st.warning(f"🟡 마지막 스크리닝 {_when}{_ago_txt} · 통과 {_passed}개")
+    else:
+        st.caption("⚪ 아직 스크리닝 기록이 없습니다 — 자동 스크리닝이 한 번 돌면 표시됩니다")
     recent_picks_count = screening_history.get_recent(days=90)
     if recent_picks_count:
         # 간단 통계

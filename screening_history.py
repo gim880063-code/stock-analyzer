@@ -29,7 +29,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import cloud_store
@@ -37,9 +37,22 @@ import cloud_store
 FILENAME = "screening_history.json"
 RETENTION_DAYS = 90
 
+# 한국 시장 앱이라 날짜·시각은 KST 기준으로 본다. 배포 환경(Streamlit Cloud)과
+# GitHub Actions 컨테이너는 UTC라, naive datetime.now() 를 쓰면 "오늘 돌았나" 판정과
+# 화면에 보여줄 실행 시각이 9시간 어긋난다 → 명시적으로 KST 로 고정.
+KST = timezone(timedelta(hours=9))
+
+
+def _kst_now() -> datetime:
+    return datetime.now(KST)
+
 
 def _today() -> str:
-    return datetime.now().strftime("%Y-%m-%d")
+    return _kst_now().strftime("%Y-%m-%d")
+
+
+def _now_stamp() -> str:
+    return _kst_now().strftime("%Y-%m-%d %H:%M")
 
 
 def _normalize_day_value(value: Any) -> dict:
@@ -51,6 +64,7 @@ def _normalize_day_value(value: Any) -> dict:
             "passed": {c: {"reason": "스크리닝 통과", "total": None, "opinion": ""} for c in codes},
             "dropped": {},
             "params": {},
+            "ran_at": None,
         }
 
     if isinstance(value, dict):
@@ -73,14 +87,19 @@ def _normalize_day_value(value: Any) -> dict:
         if not codes and passed:
             codes = [str(c) for c in passed.keys()]
 
+        ran_at = value.get("ran_at")
+        if not isinstance(ran_at, str):
+            ran_at = None
+
         return {
             "codes": codes,
             "passed": passed,
             "dropped": dropped,
             "params": params,
+            "ran_at": ran_at,
         }
 
-    return {"codes": [], "passed": {}, "dropped": {}, "params": {}}
+    return {"codes": [], "passed": {}, "dropped": {}, "params": {}, "ran_at": None}
 
 
 def _load() -> dict[str, dict]:
@@ -120,6 +139,7 @@ def record_today(codes: list[str]) -> None:
         },
         "dropped": {},
         "params": {},
+        "ran_at": _now_stamp(),
     }
     _save(_prune(history))
 
@@ -170,8 +190,45 @@ def record_today_details(
             "min_score": min_score,
             "universe": universe,
         },
+        "ran_at": _now_stamp(),
     }
     _save(_prune(history))
+
+
+def last_run() -> dict | None:
+    """가장 최근 스크리닝 '실행' 요약. 기록이 전혀 없으면 None.
+
+    날짜 키가 존재한다는 것 자체가 "그날 스크리닝이 돌았다"는 뜻이다 — 통과 0개여도
+    record_* 가 그날 항목(빈 codes)을 남기므로 '돌았는데 0개'와 '안 돌았음'이 구분된다.
+    ran_at(KST 'YYYY-MM-DD HH:MM') 은 이 기능 도입 이후 기록부터 채워지고, 그 이전
+    기록은 시각이 없어 None 일 수 있다(그 경우 날짜만 표시).
+
+    Returns:
+        {date, ran_at, ran_today, days_ago, passed_count, universe, min_score}
+    """
+    history = _load()
+    if not history:
+        return None
+    date = max(history.keys())
+    day = history[date]  # _load 가 이미 _normalize 로 표준화 (ran_at 포함)
+    params = day.get("params") or {}
+
+    days_ago = None
+    try:
+        d0 = datetime.strptime(date, "%Y-%m-%d").date()
+        days_ago = (_kst_now().date() - d0).days
+    except (ValueError, TypeError):
+        pass
+
+    return {
+        "date": date,
+        "ran_at": day.get("ran_at"),
+        "ran_today": date == _today(),
+        "days_ago": days_ago,
+        "passed_count": len(day.get("codes") or []),
+        "universe": params.get("universe"),
+        "min_score": params.get("min_score"),
+    }
 
 
 def get_recent(days: int = 90) -> dict[str, dict]:
