@@ -3292,13 +3292,56 @@ elif _screen_runner is not None and _screen_runner.get("status") in ("done", "er
                 lines.append(f"- 통과 후보 중 최고 점수: **{top_score:+d}점**")
             st.markdown("\n".join(lines))
 
-            st.markdown("#### 💡 다음 시도")
-            st.markdown(
-                f"- 사이드바에서 **최소 종합점수를 낮춰**보세요 "
-                f"(현재 `{min_score:+d}`, 추천 `{max(top_score, 0) if top_score is not None else 0:+d}` 정도부터)\n"
-                "- 더 넓은 유니버스(KOSPI TOP 50 등) 선택\n"
-                "- 5/15 이후 1Q 보고서가 등록되면 stale 제외 종목들도 후보에 다시 들어옵니다"
+            st.markdown("#### 💡 통과 0개 — 왜, 그리고 무엇이 추적되나")
+            _reg = _screen_runner.get("regime") or {}
+            _overheated = bool(_screen_runner.get("overheated") or _reg.get("overheated"))
+            _risk_off = bool(_reg.get("risk_off"))
+            _adaptive = _screen_runner.get("adaptive_picks") or []
+            _momentum = _screen_runner.get("momentum_picks") or []
+            _base_min = _screen_runner.get("min_score_base", min_score)
+
+            _notes: list[str] = []
+            if _overheated:
+                _notes.append(
+                    f"- **과열 국면**입니다 ({_reg.get('label', 'KOSPI 장기선 위 과열')}). "
+                    "대부분 종목이 이미 급등해 **고점 추격 회피 필터에서 점수 이전에 자동 제외**되므로, "
+                    "통과 0개는 비정상이 아니라 **보수적으로 맞는 신호**일 때가 많습니다."
+                )
+                if _adaptive:
+                    _names = ", ".join(r.get("name", r.get("code", "")) for r in _adaptive)
+                    _notes.append(
+                        f"- 대신 시장을 적정하게 이기는 **건전 주도주 {len(_adaptive)}개**를 "
+                        f"`적응 통과(adaptive)`로 선별해 추적 중입니다 — {_names}. "
+                        "**📊 점수 시뮬레이션**에서 성과가 검증돼요."
+                    )
+                else:
+                    _notes.append(
+                        "- 이번엔 시장 대비 초과가 적정한 **건전 주도주(adaptive)도 없어**, "
+                        "추격 가치가 낮다고 본 상태입니다."
+                    )
+                if _momentum:
+                    _notes.append(
+                        f"- 급등으로 제외됐지만 주도주 성격인 **{len(_momentum)}개**는 "
+                        "`관찰`로 함께 추적합니다 (매수 추천 아님, 사후 검증용)."
+                    )
+            elif _risk_off:
+                _notes.append(
+                    f"- **하락장 리스크오프**라 진입 기준을 {_base_min:+d} → {min_score:+d}점으로 "
+                    "의도적으로 높였습니다. 추세 역행 매수를 줄여 **손실을 방어**하려는 설계된 "
+                    "동작이라, 통과 0개가 정상입니다."
+                )
+
+            _notes.append("- 더 넓은 유니버스(KOSPI TOP 50 등)로 그물을 넓혀볼 수 있습니다.")
+            if excluded_stale > 0:
+                _notes.append(
+                    "- 분기 보고서가 등록되면 재무 stale로 제외된 종목들이 후보에 다시 들어옵니다."
+                )
+            _notes.append(
+                f"- 기준 종합점수는 수익률 보호를 위해 **{_base_min:+d}점으로 고정**"
+                "(하락장에선 자동 상향)되어 있어 화면에서 임의로 낮출 수 없습니다 — "
+                "기준을 낮추면 약한 후보가 들어와 오히려 손실 위험이 커지기 때문입니다."
             )
+            st.markdown("\n".join(_notes))
         _render_screen_diagnostics(_screen_runner)
     st.session_state.results = results
     # 다음 트리거(분석/즐겨찾기/단독 등)가 이 분기에 막히지 않도록 러너 비움
