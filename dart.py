@@ -569,26 +569,33 @@ def check_data_freshness(report_label: str | None) -> dict:
     rep_year = int(m.group(1))
     rep_type = m.group(2).strip()
 
-    # 보고서가 커버하는 회계기간 종료일 + 다음 보고서 종류
+    # 각 보고서별: (커버 종료월, 종료일,
+    #              다음 보고서명, 다음 보고서 커버 종료월·일, 다음 보고서 법정 제출기한(일), 연도 offset)
+    # 한국 정기공시 제출기한 — 분기·반기보고서: 기간종료 후 45일 / 사업보고서: 90일.
     coverage_map = {
-        "1분기보고서": (3, 31, "반기보고서"),
-        "반기보고서":   (6, 30, "3분기보고서"),
-        "3분기보고서": (9, 30, "사업보고서"),
-        "사업보고서":   (12, 31, "1분기보고서"),
+        "1분기보고서": (3, 31, "반기보고서",   6, 30, 45, 0),
+        "반기보고서":   (6, 30, "3분기보고서", 9, 30, 45, 0),
+        "3분기보고서": (9, 30, "사업보고서",   12, 31, 90, 0),
+        "사업보고서":   (12, 31, "1분기보고서", 3, 31, 45, 1),
     }
     if rep_type not in coverage_map:
         return out
 
-    end_month, end_day, next_type = coverage_map[rep_type]
+    end_month, end_day, next_type, n_em, n_ed, n_grace, yr_off = coverage_map[rep_type]
     coverage_end = datetime(rep_year, end_month, end_day)
     days_old = (datetime.now() - coverage_end).days
-    next_year = rep_year + 1 if rep_type == "사업보고서" else rep_year
+    next_year = rep_year + yr_off
+
+    # 다음 보고서가 '나왔어야 할' 시점 = 다음 보고서 커버 종료일 + 법정 제출기한.
+    # 이 마감을 지났는데도 여전히 현재 보고서가 최신이면 = 더 새 데이터가 나왔어야 하므로 stale.
+    # 단순히 "커버 종료 후 N일"로 보면, 분기 사이 정상 공백기(예: 6~8월)에도 가장 최신
+    # 보고서가 stale 로 찍혀 전 종목이 제외되던 문제가 있었음(매년 반복) → 이 방식으로 교정.
+    next_due = datetime(next_year, n_em, n_ed) + timedelta(days=n_grace)
 
     out["days_since_coverage"] = days_old
     out["coverage_end"] = coverage_end.strftime("%Y-%m-%d")
     out["next_expected"] = f"{next_year} {next_type.replace('보고서', '')}"
-    # 60일 이상 지나면 "이미 다음 분기 회계기간 진행 중" → stale
-    out["is_stale"] = days_old > 60
+    out["is_stale"] = datetime.now() > next_due
     return out
 
 
