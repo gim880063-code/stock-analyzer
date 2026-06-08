@@ -567,5 +567,46 @@ class ItemICTests(unittest.TestCase):
         self.assertLess(abs(ic), 0.3)
 
 
+class WalkForwardAggregateTests(unittest.TestCase):
+    """verifier._aggregate_walk_forward — 날짜별 IC 시계열 집계의 정확성."""
+
+    @staticmethod
+    def _make(rel, seed=42):
+        import random
+        random.seed(seed)
+        by_date = {}
+        for di in range(12):
+            rows = []
+            for s in range(-5, 6):          # 점수 -5..5
+                for _ in range(3):          # 점수당 3종목 → 날짜별 33종목
+                    rows.append((float(s), rel * s + random.gauss(0, 3)))
+            by_date[f"2026-05-{di + 1:02d}"] = rows
+        return by_date
+
+    def test_positive_signal_detected(self):
+        r = verifier._aggregate_walk_forward(self._make(1.0))
+        self.assertEqual(r["n_periods"], 12)
+        self.assertFalse(r["insufficient"])
+        self.assertGreater(r["mean_ic"], 0.3)
+        self.assertGreater(r["t_stat"], 5)
+        self.assertGreater(r["mean_spread"], 0)
+
+    def test_inverted_signal_detected(self):
+        r = verifier._aggregate_walk_forward(self._make(-1.0))
+        self.assertLess(r["mean_ic"], -0.3)
+        self.assertLess(r["t_stat"], -5)
+        self.assertLess(r["mean_spread"], 0)
+
+    def test_null_signal_not_significant(self):
+        r = verifier._aggregate_walk_forward(self._make(0.0))
+        self.assertLess(abs(r["t_stat"]), 3)   # 무신호 → 통계적으로 유의하지 않음
+
+    def test_small_cross_section_excluded(self):
+        # 한 날짜 종목 수가 WF_MIN_CROSS_SECTION 미만이면 그 날짜는 집계에서 빠진다.
+        r = verifier._aggregate_walk_forward({"2026-05-01": [(1.0, 2.0)] * 5})
+        self.assertEqual(r["n_periods"], 0)
+        self.assertTrue(r["insufficient"])
+
+
 if __name__ == "__main__":
     unittest.main()

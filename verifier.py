@@ -27,7 +27,7 @@
 from collections import defaultdict
 from datetime import datetime, timedelta
 from functools import lru_cache
-from statistics import mean, median
+from statistics import mean, median, stdev
 
 import pandas as pd
 import FinanceDataReader as fdr
@@ -620,3 +620,159 @@ def verify_item_scores(forward_days: int = 5, use_excess: bool = True) -> dict:
         "n_dates": len(dates_seen),
         "n_stocks": len(stocks_seen),
     }
+
+
+# ─────────── 종합점수 walk-forward 검증 ───────────
+# verify_item_scores 는 모든 (점수, 수익) 쌍을 한 통에 모아 IC 를 내서 기간 효과가
+# 섞인다(어떤 날 시장 전체가 오르면 그날 점수들이 다 좋아 보이는 식). walk-forward 는
+# '그날 점수 → 그 이후 수익' 만으로 날짜별 cross-section IC 를 따로 계산하고(=각 기간이
+# look-ahead 없는 out-of-sample) 그 IC 시계열을 집계해 평균·표준편차·t값까지 본다.
+# 종합점수가 '내일 이후' 수익을 실제로 변별하는지 가장 정직하게 보여주는 지표.
+WF_MIN_CROSS_SECTION = 15   # 그 날짜에 최소 이만큼 종목이 있어야 그날 IC 를 계산
+WF_MIN_PERIODS = 4          # 최소 이만큼 날짜(기간)가 모여야 집계를 신뢰
+
+
+def _composite_score_from_entry(e: dict, score_type: str = "total") -> float | None:
+    """엔트리의 항목 점수로 종합(또는 단기/중기) 점수를 *현재* 가중치로 재계산.
+
+    가중치가 바뀐 뒤에도 같은 잣대로 비교하기 위해 저장된 total 대신 scores 에서
+    weighted_score 로 다시 계산한다(_extract_score 와 동일 철학). scores 없는 옛
+    엔트리는 total 종류일 때만 저장값 사용.
+    """
+    scores = e.get("scores")
+    if scores:
+        items = [{"name": k, "score": int(v), "max": 1} for k, v in scores.items()]
+        if score_type == "short_term":
+            return float(weighted_score(items, SHORT_TERM_ITEMS)[0])
+        if score_type == "mid_term":
+            return float(weighted_score(items, MID_TERM_ITEMS)[0])
+        return float(weighted_score(items)[0])
+    if score_type == "total" and e.get("total") is not None:
+        return float(e["total"])
+    return None
+
+
+def _rank_ic(xs: list[float], ys: list[float]) -> float | None:
+    """순위상관(Spearman). 표본 3 미만이거나 x 분산이 없으면 None. (날짜별 호출용)"""
+    if len(xs) < 3 or len(set(xs)) < 2:
+        return None
+    try:
+        rx = pd.Series(xs, dtype="float64").rank()
+        ry = pd.Series(ys, dtype="float64").rank()
+        ic = rx.corr(ry)
+    except Exception:
+        return None
+    if ic is None or ic != ic:
+        return None
+    return float(ic)
+
+
+def _aggregate_walk_forward(by_date: dict, min_cross: int = WF_MIN_CROSS_SECTION) -> dict:
+    """{날짜: [(점수, forward수익), ...]} → walk-forward 집계. 순수 함수(테스트 용이).
+
+    날짜별로 cross-section rank-IC 와 분위 스프레드(상위1/3 평균 − 하위1/3 평균)를
+    계산하고, 그 시계열을 평균/표준편차/t값/양수비율로 요약한다.
+    """
+    ic_series: list[float] = []
+    spread_series: list[float] = []
+    periods: list[dict] = []
+    n_obs = 0
+    for d in sorted(by_date.keys()):
+        pairs = [(s, r) for (s, r) in by_date[d] if s is not None and r is not None]
+        if len(pairs) < min_cross:
+            continue
+        ic = _rank_ic([p[0] for p in pairs], [p[1] for p in pairs])
+        if ic is None:
+            continue
+        ordered = sorted(pairs, key=lambda p: p[0], reverse=True)
+        k = max(1, len(ordered) // 3)
+        spread = mean([r for _, r in ordered[:k]]) - mean([r for _, r in ordered[-k:]])
+        ic_series.append(ic)
+        spread_series.append(spread)
+        periods.append({"date": d, "n": len(pairs), "ic": round(ic, 3),
+                        "spread": round(spread, 2)})
+        n_obs += len(pairs)
+
+    n = len(ic_series)
+    if n == 0:
+        return {"n_periods": 0, "n_obs": 0, "insufficient": True, "mean_ic": None,
+                "ic_ir": None, "t_stat": None, "pct_ic_positive": None,
+                "mean_spread": None, "pct_spread_positive": None, "periods": []}
+
+    mean_ic = mean(ic_series)
+    std_ic = stdev(ic_series) if n > 1 else 0.0
+    ic_ir = (mean_ic / std_ic) if std_ic > 0 else None
+    t_stat = (ic_ir * (n ** 0.5)) if ic_ir is not None else None
+    return {
+        "n_periods": n,
+        "n_obs": n_obs,
+        "insufficient": n < WF_MIN_PERIODS,
+        "mean_ic": round(mean_ic, 3),
+        "ic_ir": round(ic_ir, 2) if ic_ir is not None else None,
+        "t_stat": round(t_stat, 2) if t_stat is not None else None,
+        "pct_ic_positive": round(sum(1 for x in ic_series if x > 0) / n * 100, 1),
+        "mean_spread": round(mean(spread_series), 2),
+        "pct_spread_positive": round(sum(1 for x in spread_series if x > 0) / n * 100, 1),
+        "periods": periods,
+    }
+
+
+def verify_composite_walk_forward(
+    forward_days: int = 5,
+    use_excess: bool = True,
+    score_type: str = "total",
+) -> dict:
+    """종합점수의 walk-forward 예측력. score_history 의 날짜별 점수 → forward 수익으로
+    날짜별 IC 시계열을 만들어 집계. (가격은 verify_item_scores 와 동일 인프라 사용)
+
+    반환: _aggregate_walk_forward 결과 + forward_days/use_excess/score_type.
+    """
+    all_hist = history.load_all()
+    today = _today_key()
+    market_cache: dict[str, "pd.Series | None"] = {}
+
+    def _market(m: str):
+        if m not in market_cache:
+            market_cache[m] = _fetch_market_series(m, today) if use_excess else None
+        return market_cache[m]
+
+    by_date: dict[str, list] = defaultdict(list)
+    for code, entries in all_hist.items():
+        if not entries:
+            continue
+        series = _fetch_close_series(code, today)
+        if series is None or series.empty:
+            continue
+        mser = _market(_safe_market_for_code(code))
+        for e in entries:
+            anchor = e.get("date")
+            if not anchor:
+                continue
+            score = _composite_score_from_entry(e, score_type)
+            if score is None:
+                continue
+            start_idx = _find_idx_on_or_after(series, anchor)
+            if start_idx is None:
+                continue
+            end_idx = start_idx + forward_days
+            if end_idx >= len(series):
+                continue
+            s_c = float(series.iloc[start_idx])
+            e_c = float(series.iloc[end_idx])
+            if s_c <= 0:
+                continue
+            ret = (e_c / s_c - 1) * 100
+            if use_excess and mser is not None and not mser.empty:
+                m_start = _find_idx_on_or_after(mser, anchor)
+                if m_start is not None and m_start + forward_days < len(mser):
+                    m_s = float(mser.iloc[m_start])
+                    m_e = float(mser.iloc[m_start + forward_days])
+                    if m_s > 0:
+                        ret -= (m_e / m_s - 1) * 100
+            by_date[anchor].append((float(score), ret))
+
+    result = _aggregate_walk_forward(by_date)
+    result["forward_days"] = forward_days
+    result["use_excess"] = use_excess
+    result["score_type"] = score_type
+    return result

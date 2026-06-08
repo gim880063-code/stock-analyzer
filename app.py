@@ -3116,6 +3116,54 @@ if st.session_state.get("_view_mode") == "verifier":
             key="verifier_forward_days",
             index=0,
         )
+
+        # ─── 종합점수 walk-forward 예측력 (헤드라인) ───
+        st.markdown("##### 🎯 종합점수 walk-forward 예측력")
+        st.caption(
+            "그날 종합점수로 *그 이후* 수익률을 **날짜별로 따로** 채점(rank-IC)한 뒤 평균낸 값. "
+            "각 날짜가 미래를 안 쓰는 out-of-sample 이라, 종합점수가 내일 이후 수익을 "
+            "실제로 변별하는지 가장 정직하게 보여줍니다."
+        )
+        wf = verifier.verify_composite_walk_forward(forward_days=forward_days)
+        if wf["n_periods"] == 0:
+            st.info(
+                "종합점수 검증 데이터가 부족합니다 — '한 날짜에 15종목 이상'이 "
+                f"'{verifier.WF_MIN_PERIODS}일 이상' 쌓여야 합니다. 매일 스크리닝이 돌면 자동 축적됩니다."
+            )
+        else:
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("평균 IC", f"{wf['mean_ic']:+.3f}")
+            c2.metric("t값", f"{wf['t_stat']:+.2f}" if wf["t_stat"] is not None else "-")
+            c3.metric("IC 양수 비율", f"{wf['pct_ic_positive']:.0f}%")
+            c4.metric("상·하위⅓ 수익차", f"{wf['mean_spread']:+.2f}%p")
+
+            _ic, _t = wf["mean_ic"], (wf["t_stat"] or 0.0)
+            if wf["insufficient"]:
+                st.warning(
+                    f"⚠️ 표본 부족 (기간 {wf['n_periods']}개) — 참고만 하세요. "
+                    "데이터가 더 쌓여야 신뢰할 수 있습니다."
+                )
+            elif _ic > 0.03 and _t >= 2:
+                st.success(
+                    f"✅ 종합점수가 {forward_days}일 수익을 **유의하게 예측**합니다 "
+                    f"(점수 높을수록 더 오름, t={_t:+.2f})."
+                )
+            elif _ic < -0.03 and _t <= -2:
+                st.error(
+                    f"🚨 **역방향** — 점수가 높을수록 오히려 덜 올랐습니다 (t={_t:+.2f}). "
+                    "종합점수 설계 재검토가 필요합니다."
+                )
+            else:
+                st.info(
+                    f"➖ 예측력이 통계적으로 뚜렷하지 않습니다 (t={_t:+.2f}). "
+                    "선별 필터로는 쓰되 단일 종목 매수 신호로 과신하지 마세요."
+                )
+            st.caption(
+                f"기간 {wf['n_periods']}개 · 관측 {wf['n_obs']:,}건 · {forward_days}일 뒤 시장 대비. "
+                "t값 |2| 이상이면 통계적으로 유의, IC는 0.03~0.10이면 쓸 만한 신호로 봅니다."
+            )
+        st.divider()
+
         item_result = verifier.verify_item_scores(forward_days=forward_days)
 
         _lvl_i, _msg_i = _verdict_item(item_result)
