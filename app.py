@@ -104,10 +104,23 @@ def toggle_favorite(code: str) -> None:
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
+def _full_stock_dict() -> dict[str, str]:
+    """전체 KRX 종목 목록 (코드 → 이름). 성공했을 때만 24h 캐시된다.
+
+    all_korean_stocks() 가 실패하면 예외를 그대로 올려서, st.cache_data 가 결과를
+    캐시하지 않게 한다(예외는 캐시되지 않음) → 다음 호출 때 자동 재시도.
+    """
+    return all_korean_stocks()
+
+
 def get_stock_dict() -> dict[str, str]:
-    """전체 KRX 종목 목록 (코드 → 이름). 24시간 캐시."""
+    """전체 KRX 종목 이름맵. 전체 목록 실패 시에만 작은 fallback(이건 캐시 안 함).
+
+    과거: 실패 시 15종목짜리 KOREAN_NAMES 를 24h 캐시에 박아, 그 15개 외 전 종목이
+    '?'로 표시되던 버그. 이제 fallback 은 캐시하지 않아 KRX 가 살아나면 곧바로 복구된다.
+    """
     try:
-        return all_korean_stocks()
+        return _full_stock_dict()
     except Exception:
         return KOREAN_NAMES.copy()
 
@@ -243,7 +256,7 @@ with st.sidebar:
     else:
         results_map = {r["code"]: r for r in st.session_state.get("results", [])}
         for code in favorites:
-            name = stock_dict.get(code, "?")
+            name = stock_dict.get(code, code)
             r = results_map.get(code)
             with st.container(border=True):
                 col_main, col_x = st.columns([5, 1])
@@ -312,7 +325,7 @@ with st.sidebar:
 
         _trail_pct = float(port.load_settings().get("trail_pct", 10.0))
         for code, h in portfolio.items():
-            name = stock_dict.get(code, "?")
+            name = stock_dict.get(code, code)
             r = results_map.get(code)
             with st.container(border=True):
                 col_main, col_x = st.columns([5, 1])
@@ -3073,7 +3086,7 @@ if st.session_state.get("_view_mode") == "verifier":
             for r in result["rows"]:
                 cur_score = r.get("current_score")
                 detail_rows.append({
-                    "종목": f"{stock_dict.get(r['code'], '?')} ({r['code']})",
+                    "종목": f"{stock_dict.get(r['code'], r['code'])} ({r['code']})",
                     "발굴일": r["added_at"] or "-",
                     "보유일": r.get("days_held") if r.get("days_held") is not None else "-",
                     "발굴점수": f"{r['added_score']:+d}" if r["added_score"] is not None else "-",
