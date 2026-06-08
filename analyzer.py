@@ -2,12 +2,14 @@
 주식 분석 리포트 - 분석 엔진
 한 종목의 가격/재무 데이터를 받아 항목 점수화 + 한글 리포트 생성
 """
+import io
 import sys
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from functools import lru_cache
 from typing import TypedDict
 import FinanceDataReader as fdr
 import pandas as pd
+import requests
 
 import dart
 import naver
@@ -15,9 +17,48 @@ import llm
 import history
 
 
+# FinanceDataReader가 KRX 전 종목 스냅샷을 받아오는 일별 캐시 저장소(GitHub).
+# fdr 0.9.x 는 KRX의 max_work_dt(보통 '오늘')로 파일을 찾는데, 그 날짜 CSV가
+# 아직 업로드되지 않으면 404로 죽는다(장 마감 직후·연휴 다음날 등에 자주 발생).
+_KRX_CACHE_BASE = (
+    "https://raw.githubusercontent.com/FinanceData/fdr_krx_data_cache"
+    "/refs/heads/master/data/listing/krx"
+)
+
+
+def _krx_listing_fallback() -> pd.DataFrame:
+    """오늘부터 거슬러 올라가며 캐시 저장소에 '실제로 존재하는' 최신 스냅샷을 가져온다.
+
+    fdr.StockListing('KRX')가 오늘자 파일 부재(404)로 실패할 때의 폴백.
+    종목 목록·시총은 하루 차이로 거의 변하지 않으므로 유니버스 구성엔 문제없다.
+    """
+    today = date.today()
+    last_err: Exception | None = None
+    for i in range(10):
+        d = (today - timedelta(days=i)).strftime("%Y-%m-%d")
+        url = f"{_KRX_CACHE_BASE}/{d}.csv"
+        try:
+            r = requests.get(url, timeout=10)
+            if r.status_code == 200:
+                return pd.read_csv(
+                    io.StringIO(r.text),
+                    dtype={"Code": str, "Dept": str, "ChangeCode": str, "MarketId": str},
+                )
+            last_err = RuntimeError(f"{url} -> HTTP {r.status_code}")
+        except Exception as e:  # noqa: BLE001 - 네트워크/파싱 오류 모두 다음 날짜로 재시도
+            last_err = e
+    raise RuntimeError(
+        f"KRX 종목 목록 캐시를 찾지 못했습니다 (최근 10일 모두 실패): {last_err}"
+    )
+
+
 @lru_cache(maxsize=1)
 def _krx_listing() -> pd.DataFrame:
-    return fdr.StockListing("KRX")
+    try:
+        return fdr.StockListing("KRX")
+    except Exception:
+        # fdr이 오늘자 캐시 부재 등으로 실패하면 최신 가용 스냅샷으로 폴백
+        return _krx_listing_fallback()
 
 
 def get_shares_outstanding(code: str) -> int | None:
