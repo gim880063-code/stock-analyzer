@@ -137,7 +137,7 @@ def run(universe: str, min_score: int, deep: bool, workers: int) -> dict:
     regime = market_regime_state()
     min_score, _boost = effective_min_score(_base_min, regime=regime)
     if _boost:
-        _log(f"리스크오프 감지({regime.get('label')}) — 진입 기준 {_base_min} → {min_score} 상향")
+        _log(f"방어 국면 감지({regime.get('label')}) — 진입 기준 {_base_min} → {min_score} 상향")
 
     fresh.sort(key=lambda r: r.get("total", -999), reverse=True)
     candidates = [r for r in fresh if r.get("total", -999) >= min_score]

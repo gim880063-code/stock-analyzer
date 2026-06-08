@@ -2,6 +2,7 @@
 주식 분석 리포트 - 분석 엔진
 한 종목의 가격/재무 데이터를 받아 항목 점수화 + 한글 리포트 생성
 """
+import ast
 import io
 import sys
 from datetime import date, datetime, timedelta
@@ -690,30 +691,80 @@ def score_market_regime(code: str) -> ScoreItem | None:
 # ─── 시장 리스크오프 스위치 (하락장 방어) ───
 # KOSPI가 장기 이동평균(기본 200일) 아래면 '위험 회피' 국면으로 보고 신규 진입
 # 기준점수를 높여 추세에 맞서는 매수를 줄인다. 개인의 큰 손실을 막는 핵심 한 수.
+def _naver_index_closes(symbol: str = "KOSPI", days: int = 14):
+    """네이버 금융에서 최근 지수 종가 시리즈 — fdr 지연분(당일 등) 보충용. 실패 시 None.
+
+    fdr 의 KS11 은 장 마감 후에도 당일 종가가 한참 늦게 들어와, 급락 당일엔 국면
+    판정이 전날 데이터로 이뤄지는 문제가 있다. 네이버는 거의 실시간이라 이걸로 보충한다.
+    """
+    try:
+        end = datetime.now()
+        start = end - timedelta(days=days)
+        url = (
+            f"https://api.finance.naver.com/siseJson.naver?symbol={symbol}"
+            f"&requestType=1&startTime={start:%Y%m%d}&endTime={end:%Y%m%d}&timeframe=day"
+        )
+        r = requests.get(
+            url,
+            headers={"User-Agent": "Mozilla/5.0", "Referer": "https://finance.naver.com/"},
+            timeout=10,
+        )
+        # 네이버 응답은 헤더 행이 작은따옴표라 순수 JSON이 아님 → 파이썬 리터럴로 파싱.
+        rows = ast.literal_eval(r.text.strip())  # [[헤더...], ["YYYYMMDD",시,고,저,종,거래량,...], ...]
+        out = {}
+        for row in rows[1:]:
+            out[pd.to_datetime(str(row[0]))] = float(row[4])  # index 4 = 종가
+        if not out:
+            return None
+        return pd.Series(out).sort_index()
+    except Exception:
+        return None
+
+
 @lru_cache(maxsize=2)
 def _kospi_series_for_regime(date_key: str):
+    base = None
     try:
         end = datetime.now()
         start = end - timedelta(days=420)   # MA200 계산엔 ~285 거래일 필요
         idx = fdr.DataReader("KS11", start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"))
-        if idx is None or idx.empty:
-            return None
-        return idx["Close"].dropna().astype(float)
+        if idx is not None and not idx.empty:
+            base = idx["Close"].dropna().astype(float)
     except Exception:
+        base = None
+
+    # fdr 가 아직 안 준 최신 거래일(당일 등)을 네이버로 보충 (best-effort)
+    naver = _naver_index_closes("KOSPI")
+    if naver is not None and len(naver):
+        if base is None or base.empty:
+            base = naver
+        else:
+            extra = naver[naver.index > base.index[-1]]
+            if len(extra):
+                base = pd.concat([base, extra])
+
+    if base is None or base.empty:
         return None
+    return base[~base.index.duplicated(keep="last")].sort_index()
 
 
 # 과열(overheated) 판정 임계 — KOSPI가 장기선 대비 이만큼 위면 '단기 추격 주의' 국면.
 # risk_off(아래)와 독립이며, 과열이라고 진입 기준점수를 올리지는 않는다(관찰만 강화).
 OVERHEAT_GAP_PCT = 20.0
 
+# 단기 급락(조정) 감지 — 장기선(과열/리스크오프)과 독립. 최근 N거래일 고점 대비
+# 이 %p 이상 빠지면 '급락 국면'. 200일선 한참 위라(=과열) risk_off 가 안 켜지는
+# 버블 붕괴 초입을 잡아낸다. 급락 시엔 신규 진입 기준을 방어적으로 올리고 적응 통과를 끈다.
+SHARP_DROP_LOOKBACK = 20
+SHARP_DROP_PCT = -7.0
+
 
 def _regime_from_series(close, ma_window: int = 200) -> dict:
     """종가 시리즈로 리스크오프/과열 국면 판정 — 네트워크 없는 순수 함수(테스트용)."""
     if close is None or len(close) < 60:
-        return {"risk_off": False, "overheated": False,
-                "label": "판단 보류 (데이터 부족)",
-                "ma_window": ma_window, "gap_pct": None, "close": None, "ma": None}
+        return {"risk_off": False, "overheated": False, "sharp_drop": False,
+                "label": "판단 보류 (데이터 부족)", "ma_window": ma_window,
+                "gap_pct": None, "drawdown_pct": None, "close": None, "ma": None}
     if len(close) < ma_window:
         ma_window = 60   # MA200 불가 시 보조로 60일선
     last = float(close.iloc[-1])
@@ -721,14 +772,33 @@ def _regime_from_series(close, ma_window: int = 200) -> dict:
     gap = (last / ma - 1) * 100 if ma > 0 else 0.0
     risk_off = last < ma
     overheated = gap >= OVERHEAT_GAP_PCT
+
+    # 단기 급락 — 최근 고점 대비 낙폭. 200일선 위(과열)라도 버블 붕괴 초입을 잡는다.
+    drawdown = None
+    sharp_drop = False
+    if len(close) >= SHARP_DROP_LOOKBACK:
+        recent_high = float(close.iloc[-SHARP_DROP_LOOKBACK:].max())
+        if recent_high > 0:
+            drawdown = (last / recent_high - 1) * 100
+            sharp_drop = drawdown <= SHARP_DROP_PCT
+
     if risk_off:
-        label = f"위험 회피 국면 — KOSPI가 {ma_window}일선 아래 ({gap:+.1f}%)"
+        base = f"위험 회피 국면 — KOSPI가 {ma_window}일선 아래 ({gap:+.1f}%)"
     elif overheated:
-        label = f"과열 국면 — KOSPI가 {ma_window}일선 +{gap:.1f}% (단기 추격 주의)"
+        base = f"과열 국면 — KOSPI가 {ma_window}일선 +{gap:.1f}%"
     else:
-        label = f"정상 국면 — KOSPI가 {ma_window}일선 위 ({gap:+.1f}%)"
-    return {"risk_off": risk_off, "overheated": overheated, "label": label,
-            "ma_window": ma_window, "gap_pct": round(gap, 2),
+        base = f"정상 국면 — KOSPI가 {ma_window}일선 위 ({gap:+.1f}%)"
+
+    if sharp_drop:
+        label = f"급락/조정 국면 — 최근 고점 대비 {drawdown:.1f}% (신규 진입 방어) · {base}"
+    elif overheated and not risk_off:
+        label = base + " (단기 추격 주의)"
+    else:
+        label = base
+
+    return {"risk_off": risk_off, "overheated": overheated, "sharp_drop": sharp_drop,
+            "label": label, "ma_window": ma_window, "gap_pct": round(gap, 2),
+            "drawdown_pct": round(drawdown, 2) if drawdown is not None else None,
             "close": round(last, 2), "ma": round(ma, 2)}
 
 
@@ -751,7 +821,8 @@ def effective_min_score(base_min: int, regime: dict | None = None,
         return base_min, 0
     if regime is None:
         regime = market_regime_state()
-    if regime.get("risk_off"):
+    # 리스크오프(200일선 아래) 또는 단기 급락 — 둘 다 신규 진입을 방어적으로 보수화.
+    if regime.get("risk_off") or regime.get("sharp_drop"):
         boost = int(settings.get("risk_off_score_boost", 2) or 0)
         return base_min + boost, boost
     return base_min, 0
@@ -867,6 +938,8 @@ def select_adaptive_picks(
     """
     if not (regime and regime.get("overheated")):
         return []
+    if regime.get("sharp_drop"):
+        return []  # 급락 국면 — 추격성 적응 통과 중단 (수익률 방어 우선)
     passed = passed_codes or set()
     cand: list[dict] = []
     for r in screened:
