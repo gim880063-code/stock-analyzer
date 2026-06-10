@@ -47,19 +47,9 @@ HORIZON_DAYS = {"5d": 5, "20d": 20, "60d": 60}
 # 신호가 작동할 시간 부족한 종목은 통계 노이즈 — 기본 최소 5 영업일 보유 필요.
 DEFAULT_MIN_HOLD_DAYS = 5
 
-# 왕복 거래비용(매매수수료 + 매도 증권거래세 + 슬리피지) 기본값(%).
-# 한국 시장: 매도세 ~0.15% + 양방향 수수료 + 슬리피지 → 대략 0.5% 왕복.
-# 짧은 보유 신호의 작은 초과수익은 이 비용에 먹히므로 net(비용 차감) 수익을 함께 본다.
-DEFAULT_ROUND_TRIP_COST_PCT = 0.5
-
 # 항목별 rank-IC(순위상관) 를 보고할 최소 관측치. 이보다 적으면 IC=None 처리한다
 # (점수가 -1/0/+1 같은 거친 정수라, 표본이 적으면 상관계수가 크게 요동침).
 IC_MIN_OBS = 30
-
-
-def net_return(gross_pct: float, round_trip_cost_pct: float) -> float:
-    """총수익률에서 왕복 거래비용을 차감한 net 수익률 (음수 비용은 0 취급)."""
-    return round(gross_pct - max(0.0, round_trip_cost_pct), 2)
 
 
 # ─────────── 가격 fetch 헬퍼 ───────────
@@ -302,7 +292,6 @@ def verify_scouted(
     score_type: str = "total",
     horizon: str = "all",
     min_hold_days: int = DEFAULT_MIN_HOLD_DAYS,
-    round_trip_cost_pct: float | None = None,
     kind: str = "picked",
 ) -> dict:
     """
@@ -330,16 +319,6 @@ def verify_scouted(
         score_type = "total"
     if horizon not in HORIZONS:
         horizon = "all"
-
-    if round_trip_cost_pct is None:
-        try:
-            import portfolio
-            round_trip_cost_pct = float(
-                portfolio.load_settings().get("round_trip_cost_pct", DEFAULT_ROUND_TRIP_COST_PCT)
-            )
-        except Exception:
-            round_trip_cost_pct = DEFAULT_ROUND_TRIP_COST_PCT
-    cost = max(0.0, float(round_trip_cost_pct))
 
     items = scouted.load_scouted()
     today = _today_key()
@@ -423,11 +402,9 @@ def verify_scouted(
             "current_close": end_close,
             "days_held": days_held,
             "return_pct": round(ret_pct, 2),
-            "net_return_pct": net_return(ret_pct, cost),
             "market": market,
             "market_return_pct": round(market_ret, 2) if market_ret is not None else None,
             "excess_return_pct": round(excess, 2) if excess is not None else None,
-            "net_excess_pct": net_return(excess, cost) if excess is not None else None,
             "current_score": current_score,
             "universe": info.get("universe", ""),
         })
@@ -441,7 +418,6 @@ def verify_scouted(
     )
 
     abs_vals = [r["return_pct"] for r in rows]
-    net_vals = [r["net_return_pct"] for r in rows]
     ex_vals = [r["excess_return_pct"] for r in rows if r["excess_return_pct"] is not None]
 
     return {
@@ -456,13 +432,6 @@ def verify_scouted(
             round(sum(1 for x in abs_vals if x > 0) / len(abs_vals) * 100, 1)
             if abs_vals else None
         ),
-        "overall_avg_net": round(mean(net_vals), 2) if net_vals else None,
-        "overall_median_net": round(median(net_vals), 2) if net_vals else None,
-        "overall_win_rate_net": (
-            round(sum(1 for x in net_vals if x > 0) / len(net_vals) * 100, 1)
-            if net_vals else None
-        ),
-        "round_trip_cost_pct": cost,
         "overall_avg_excess": round(mean(ex_vals), 2) if ex_vals else None,
         "overall_median_excess": round(median(ex_vals), 2) if ex_vals else None,
         "overall_excess_win_rate": (

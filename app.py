@@ -416,11 +416,6 @@ with st.sidebar:
             value=float(_rs["trail_pct"]), key="rs_trail",
             help="보유 종목이 고점 대비 이만큼 떨어지면 '이익 보호' 알림.",
         )
-        _cost = st.number_input(
-            "왕복 거래비용 (%)", min_value=0.0, max_value=3.0, step=0.05,
-            value=float(_rs.get("round_trip_cost_pct", 0.5)), key="rs_cost",
-            help="매매수수료+매도세+슬리피지 합산. 검증 화면의 '비용 차감 수익'에 사용. 보통 0.3~0.5%.",
-        )
         _ro_on = st.checkbox(
             "하락장 방어 (코스피 200일선 아래면 진입 기준 상향)",
             value=bool(_rs.get("risk_off_enabled", True)), key="rs_ro_on",
@@ -435,7 +430,6 @@ with st.sidebar:
             port.save_settings({
                 "account_equity": _eq, "risk_per_trade_pct": _risk,
                 "max_position_pct": _maxpos, "trail_pct": _trail,
-                "round_trip_cost_pct": _cost,
                 "risk_off_enabled": _ro_on,
                 "risk_off_score_boost": _ro_boost,
             })
@@ -3043,26 +3037,6 @@ if st.session_state.get("_view_mode") == "verifier":
                 help="초과수익이 양수인 종목 비율. 50% 넘으면 점수가 시장 평균을 이긴다는 신호.",
             )
 
-            # 거래비용·세금 차감 net 수익 — 실제 손에 쥐는 수익에 더 가깝다.
-            cost_pct = result.get("round_trip_cost_pct", 0.5)
-            row3 = st.columns(3)
-            avg_net = result.get("overall_avg_net")
-            row3[0].metric(
-                "비용 차감 평균",
-                f"{avg_net:+.2f}%" if avg_net is not None else "-",
-                help=f"왕복 거래비용·세금 {cost_pct:.2f}% 차감 후 평균. 사이드바 설정에서 비용% 조정 가능.",
-            )
-            wr_net = result.get("overall_win_rate_net")
-            row3[1].metric("비용 차감 승률", f"{wr_net}%" if wr_net is not None else "-")
-            med_net = result.get("overall_median_net")
-            row3[2].metric("비용 차감 중앙값", f"{med_net:+.2f}%" if med_net is not None else "-")
-
-            if avg is not None and avg_net is not None and avg > 0 and avg_net <= 0:
-                st.warning(
-                    f"⚠️ 비용 전 평균은 +{avg:.2f}%지만 거래비용·세금({cost_pct:.2f}%)을 빼면 "
-                    f"**{avg_net:+.2f}%**로 거의 사라집니다. 짧은 보유·잦은 매매일수록 비용이 수익을 먹습니다."
-                )
-
             excluded = result.get("excluded_short_hold", 0)
             if excluded > 0:
                 if horizon == "all":
@@ -3094,7 +3068,6 @@ if st.session_state.get("_view_mode") == "verifier":
                     "발굴가": f"{r['added_close']:,.0f}",
                     "현재가": f"{r['current_close']:,.0f}",
                     "수익률(%)": r["return_pct"],
-                    "비용차감(%)": r.get("net_return_pct"),
                     "시장(%)": r.get("market_return_pct") if r.get("market_return_pct") is not None else "-",
                     "초과(%p)": r.get("excess_return_pct") if r.get("excess_return_pct") is not None else "-",
                     "유니버스": r.get("universe", ""),
