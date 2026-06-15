@@ -82,6 +82,35 @@ def is_configured() -> bool:
     return bool(pat and gist_id)
 
 
+def _resolve_content(name: str, f: dict, pat: str) -> str:
+    """Gist 파일 하나의 '전체' 내용을 돌려준다.
+
+    GitHub 의 gist 상세 응답(GET /gists/{id})은 인라인으로 담는 전체 용량에 한도가
+    있어서, 한도를 넘으면 뒤쪽 파일부터 content 를 잘라 일부만 주고 truncated=true 로
+    표시한다. 잘린 JSON 을 그대로 파싱하면 깨져서 '빈 데이터'로 읽히고(→ 화면엔
+    "기록 없음"), 더 위험하게는 그 빈 값을 base 로 read-modify-write 하면 원격 파일이
+    통째로 잘린 채 덮어써질 수 있다. 그래서 잘린 파일은 raw_url 로 원문 전체를 다시
+    받아온다. (예: score_history.json 이 커지면서 screening_history.json 이 잘리던 건.)
+    """
+    content = f.get("content", "") or ""
+    if not f.get("truncated"):
+        return content
+    raw_url = f.get("raw_url")
+    if not raw_url:
+        return content
+    try:
+        rr = requests.get(
+            raw_url,
+            headers={"Authorization": f"token {pat}"},
+            timeout=15,
+        )
+        if rr.ok and rr.text:
+            return rr.text
+    except Exception:
+        pass
+    return content  # raw 재요청 실패 시엔 부분 내용이라도 — load() 가 default 로 처리
+
+
 def _fetch_gist_files() -> dict[str, str]:
     """Gist의 모든 파일 내용을 가져옴.
 
@@ -89,6 +118,7 @@ def _fetch_gist_files() -> dict[str, str]:
     갱신한 최신본을 오래 떠 있는 배포 앱이 자동으로 반영한다.
     읽기에 실패하면 캐시를 '빈 값'으로 덮어쓰지 않고 직전 정상본을 유지한다
     (빈 값으로 오염되면 read-modify-write 시 원격 데이터가 통째로 날아갈 수 있음).
+    용량 한도로 잘려 온 파일은 raw_url 로 원문 전체를 다시 받는다(_resolve_content).
     """
     global _gist_cache, _gist_cache_at
     with _lock:
@@ -113,7 +143,7 @@ def _fetch_gist_files() -> dict[str, str]:
                 # 일시적 실패 — 직전 정상본 유지(없으면 이번 호출만 빈 값).
                 return _gist_cache if _gist_cache is not None else {}
             files = r.json().get("files", {})
-            _gist_cache = {name: f.get("content", "") for name, f in files.items()}
+            _gist_cache = {name: _resolve_content(name, f, pat) for name, f in files.items()}
             _gist_cache_at = now
             return _gist_cache
         except Exception:
