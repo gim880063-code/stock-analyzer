@@ -5,6 +5,7 @@
 import ast
 import io
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
 from functools import lru_cache
 from typing import TypedDict
@@ -1423,15 +1424,17 @@ def analyze_and_score_disclosures(
         ]
         important.sort(key=lambda d: priority.get(d["category"], 99))
 
-        for d in important[:deep_analysis_top_n]:
+        targets = important[:deep_analysis_top_n]
+
+        def _deep_one(d: dict) -> None:
             cache = llm.get_cache()
             if cache.has_pro_analysis(d["rcept_no"]):
                 d.update(cache.get(d["rcept_no"]))
-                continue
+                return
             try:
                 content = dart.get_disclosure_content(d["rcept_no"])
                 if not content:
-                    continue
+                    return
                 pro_result = llm.deep_analyze(
                     d["rcept_no"], d["title"],
                     d.get("submitter", ""), d.get("date", ""), content,
@@ -1439,6 +1442,16 @@ def analyze_and_score_disclosures(
                 d.update(pro_result)
             except Exception:
                 pass  # Flash 분류 결과 유지
+
+        # 공시 본문 fetch + LLM 깊이 분석을 병렬로 — 순차 시 종목당 ~4초가 가장 큰 병목.
+        # LLM 호출은 llm._safe_call 의 429 재시도·서킷브레이커로 보호되고 Flash 모델이라
+        # 동시 호출이 안전. (이 경로는 개별/단독 분석에서만 — 스크리닝 1단계는 lite)
+        if len(targets) <= 1:
+            for d in targets:
+                _deep_one(d)
+        else:
+            with ThreadPoolExecutor(max_workers=len(targets)) as _ex:
+                list(_ex.map(_deep_one, targets))
 
     # 3단계: 점수 산출
     cats = [d.get("category", "neutral") for d in enriched]
