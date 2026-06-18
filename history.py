@@ -35,6 +35,27 @@ import cloud_store
 FILENAME = "score_history.json"
 RETENTION_DAYS = 365
 
+# 과거 항목 이름 → 현재 이름. 점수 항목 이름이 바뀌면(예: "재무"→"재무 건전성")
+# 옛 기록이 옛 이름으로 남아, 검증(IC/walk-forward)에서 같은 항목이 둘로 쪼개지고
+# 옛 이름 쪽은 표본이 적어 예측력을 못 잰다. 읽는 시점에 현재 이름으로 통일한다.
+SCORE_NAME_ALIASES = {"재무": "재무 건전성"}
+
+
+def _normalize_scores(scores: dict) -> dict:
+    """scores dict의 옛 항목 이름을 현재 이름으로 통일. 같은 엔트리에 옛/새 이름이
+    공존하면 현재 이름(새) 값을 보존한다."""
+    if not isinstance(scores, dict):
+        return scores
+    if not any(k in SCORE_NAME_ALIASES for k in scores):
+        return scores  # 옛 이름 없으면 그대로 (대다수 경로 — 비용 거의 0)
+    out: dict = {}
+    for k, v in scores.items():
+        canon = SCORE_NAME_ALIASES.get(k, k)
+        if canon in out and k != canon:
+            continue  # 이미 현재 이름 값이 있으면 옛 이름은 버림
+        out[canon] = v
+    return out
+
 _lock = threading.Lock()
 _deferred_buffer: dict[str, list[dict]] | None = None
 # 중첩/동시 batch 호출 시에도 안전하도록 reference count로 관리.
@@ -45,7 +66,15 @@ _batch_depth = 0
 
 def _load() -> dict[str, list[dict]]:
     data = cloud_store.load(FILENAME, {})
-    return data if isinstance(data, dict) else {}
+    if not isinstance(data, dict):
+        return {}
+    for entries in data.values():
+        if not isinstance(entries, list):
+            continue
+        for e in entries:
+            if isinstance(e, dict) and isinstance(e.get("scores"), dict):
+                e["scores"] = _normalize_scores(e["scores"])
+    return data
 
 
 def _save(history: dict[str, list[dict]]) -> None:

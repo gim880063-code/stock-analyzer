@@ -502,6 +502,24 @@ class RiskSettingsTests(unittest.TestCase):
         self.assertEqual(s["risk_off_score_boost"], 2)
 
 
+class ScoreNameAliasTests(unittest.TestCase):
+    def test_old_name_mapped_to_current(self):
+        import history
+        out = history._normalize_scores({"재무": 2, "추세": 1})
+        self.assertEqual(out, {"재무 건전성": 2, "추세": 1})
+
+    def test_current_name_wins_when_both_present(self):
+        import history
+        out = history._normalize_scores({"재무": 1, "재무 건전성": 2})
+        self.assertEqual(out["재무 건전성"], 2)
+        self.assertNotIn("재무", out)
+
+    def test_no_alias_unchanged(self):
+        import history
+        d = {"추세": 1, "재무 건전성": 2}
+        self.assertEqual(history._normalize_scores(d), d)
+
+
 class MarketRegimeTests(unittest.TestCase):
     def _series(self, values):
         return pd.Series([float(v) for v in values])
