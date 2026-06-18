@@ -3011,11 +3011,21 @@ if st.session_state.get("_view_mode") == "verifier":
         else:
             # 메인 메트릭 6칸: 절대 평균/중앙/승률 + 초과 평균/중앙/승률
             row1 = st.columns(3)
-            row1[0].metric("발굴 종목", f"{result['total_count']}개")
+            row1[0].metric(
+                "발굴 종목", f"{result['total_count']}개",
+                help="검증에 사용한 발굴 종목 수. 수십 개 미만이면 결과를 믿기 어려움.",
+            )
             avg = result.get("overall_avg")
-            row1[1].metric("평균 수익률", f"{avg:+.2f}%" if avg is not None else "-")
+            row1[1].metric(
+                "평균 수익률", f"{avg:+.2f}%" if avg is not None else "-",
+                help="발굴한 뒤 종목들이 평균 몇 % 올랐는지(전체 평균). 시장이 오르내린 "
+                     "영향이 섞여 있어 — 진짜 실력은 아래 '시장 대비'로 봐야 함.",
+            )
             wr = result.get("overall_win_rate")
-            row1[2].metric("승률", f"{wr}%" if wr is not None else "-")
+            row1[2].metric(
+                "승률", f"{wr}%" if wr is not None else "-",
+                help="수익이 플러스로 끝난 종목의 비율.",
+            )
 
             row2 = st.columns(3)
             med = result.get("overall_median")
@@ -3108,10 +3118,27 @@ if st.session_state.get("_view_mode") == "verifier":
                 )
             else:
                 c1, c2, c3, c4 = st.columns(4)
-                c1.metric("평균 IC", f"{wf['mean_ic']:+.3f}")
-                c2.metric("t값", f"{wf['t_stat']:+.2f}" if wf["t_stat"] is not None else "-")
-                c3.metric("IC 양수 비율", f"{wf['pct_ic_positive']:.0f}%")
-                c4.metric("상·하위⅓ 수익차", f"{wf['mean_spread']:+.2f}%p")
+                c1.metric(
+                    "평균 IC", f"{wf['mean_ic']:+.3f}",
+                    help="점수 순서와 이후 수익 순서가 맞아떨어지는 정도 (-1~+1). "
+                         "+면 점수 높은 종목이 더 올랐다는 뜻. 0.03~0.10이면 쓸 만, "
+                         "그 위면 좋음, 0 근처면 무관, 마이너스면 거꾸로 작동.",
+                )
+                c2.metric(
+                    "t값", f"{wf['t_stat']:+.2f}" if wf["t_stat"] is not None else "-",
+                    help="위 IC가 우연인지 진짜인지 재는 값. 절댓값이 2를 넘으면 "
+                         "'우연이라 보기 어렵다(믿을 만하다)'는 뜻. 표본이 적으면 작게 나옴.",
+                )
+                c3.metric(
+                    "IC 양수 비율", f"{wf['pct_ic_positive']:.0f}%",
+                    help="여러 날 중 점수가 제대로(플러스로) 작동한 날의 비율. "
+                         "50%를 넘으면 대체로 맞는 쪽, 높을수록 꾸준히 통한다는 뜻.",
+                )
+                c4.metric(
+                    "상·하위⅓ 수익차", f"{wf['mean_spread']:+.2f}%p",
+                    help="점수 상위 1/3 종목이 하위 1/3보다 평균 몇 %p 더 벌었는지. "
+                         "클수록(+) 점수가 좋은 종목과 나쁜 종목을 잘 가른다는 뜻.",
+                )
 
                 _ic, _t = wf["mean_ic"], (wf["t_stat"] or 0.0)
                 if wf["insufficient"]:
@@ -3174,7 +3201,24 @@ if st.session_state.get("_view_mode") == "verifier":
                     "관측 수": st_.get("n", st_["total_samples"]),
                 })
             st.markdown(f"##### 항목별 예측력 ({forward_days}일 뒤, 시장 대비 기준)")
-            st.dataframe(pd.DataFrame(spread_rows), hide_index=True, use_container_width=True)
+            st.dataframe(
+                pd.DataFrame(spread_rows), hide_index=True, use_container_width=True,
+                column_config={
+                    "예측력 IC": st.column_config.Column(
+                        help="그 항목 점수와 이후 수익이 순서대로 맞는 정도 (-1~+1). "
+                             "+면 점수 높을수록 더 오름, 0 근처면 무관, 마이너스면 거꾸로. "
+                             "0.03~0.10이면 쓸 만.",
+                    ),
+                    "spread(%p)": st.column_config.Column(
+                        help="그 항목 점수가 플러스일 때 평균수익에서 마이너스일 때 "
+                             "평균수익을 뺀 값. 클수록 그 항목이 수익을 잘 가른다는 뜻.",
+                    ),
+                    "관측 수": st.column_config.Column(
+                        help="계산에 쓴 (종목×날짜) 기록 수. 30건 미만이면 '표본부족'으로 "
+                             "표시되고 믿기 어려움.",
+                    ),
+                },
+            )
 
             st.markdown("##### 항목 상세 — 점수값별 수익률")
             for item in ranked:
