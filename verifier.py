@@ -162,6 +162,8 @@ def _extract_score(info: dict, score_type: str) -> int | None:
     added_scores 없는 옛 엔트리만 저장된 added_score 사용.
     """
     added_scores = info.get("added_scores")
+    if added_scores:
+        added_scores = history.normalize_scores(added_scores)  # 옛 항목명 통일 (재무 → 재무 건전성)
 
     if score_type == "total":
         if added_scores:

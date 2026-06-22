@@ -41,9 +41,9 @@ RETENTION_DAYS = 365
 SCORE_NAME_ALIASES = {"재무": "재무 건전성"}
 
 
-def _normalize_scores(scores: dict) -> dict:
+def normalize_scores(scores: dict) -> dict:
     """scores dict의 옛 항목 이름을 현재 이름으로 통일. 같은 엔트리에 옛/새 이름이
-    공존하면 현재 이름(새) 값을 보존한다."""
+    공존하면 현재 이름(새) 값을 보존한다. (history·발굴 검증이 공용으로 사용)"""
     if not isinstance(scores, dict):
         return scores
     if not any(k in SCORE_NAME_ALIASES for k in scores):
@@ -73,7 +73,7 @@ def _load() -> dict[str, list[dict]]:
             continue
         for e in entries:
             if isinstance(e, dict) and isinstance(e.get("scores"), dict):
-                e["scores"] = _normalize_scores(e["scores"])
+                e["scores"] = normalize_scores(e["scores"])
     return data
 
 

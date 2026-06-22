@@ -505,19 +505,26 @@ class RiskSettingsTests(unittest.TestCase):
 class ScoreNameAliasTests(unittest.TestCase):
     def test_old_name_mapped_to_current(self):
         import history
-        out = history._normalize_scores({"재무": 2, "추세": 1})
+        out = history.normalize_scores({"재무": 2, "추세": 1})
         self.assertEqual(out, {"재무 건전성": 2, "추세": 1})
 
     def test_current_name_wins_when_both_present(self):
         import history
-        out = history._normalize_scores({"재무": 1, "재무 건전성": 2})
+        out = history.normalize_scores({"재무": 1, "재무 건전성": 2})
         self.assertEqual(out["재무 건전성"], 2)
         self.assertNotIn("재무", out)
 
     def test_no_alias_unchanged(self):
         import history
         d = {"추세": 1, "재무 건전성": 2}
-        self.assertEqual(history._normalize_scores(d), d)
+        self.assertEqual(history.normalize_scores(d), d)
+
+    def test_verify_extract_score_normalizes_old_name(self):
+        import verifier
+        # 5/14~5/26 발굴분: added_scores에 옛 "재무" 키 → 중기 점수에 재무가 포함돼야.
+        # 정규화 없으면 "재무"가 MID_TERM_ITEMS 필터에서 빠져 2점으로 과소계상됨.
+        info = {"added_scores": {"재무": 2, "성장성": 1, "추세": 1}}
+        self.assertEqual(verifier._extract_score(info, "mid_term"), 4)
 
 
 class TrailingStopTests(unittest.TestCase):
