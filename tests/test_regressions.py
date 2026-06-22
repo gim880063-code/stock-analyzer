@@ -520,6 +520,34 @@ class ScoreNameAliasTests(unittest.TestCase):
         self.assertEqual(history._normalize_scores(d), d)
 
 
+class TrailingStopTests(unittest.TestCase):
+    def _s(self, vals):
+        return pd.Series([float(v) for v in vals])
+
+    def test_stops_on_drawdown(self):
+        import verifier
+        # 100 진입 → 고점 120 → 120의 -10%(108) 이하인 105에서 청산
+        ret, days, stopped = verifier._trailing_stop_return(
+            self._s([100, 110, 120, 105, 130]), 0, 4, 10.0)
+        self.assertTrue(stopped)
+        self.assertEqual(days, 3)
+        self.assertAlmostEqual(ret, 5.0)
+
+    def test_no_stop_holds_to_end(self):
+        import verifier
+        ret, days, stopped = verifier._trailing_stop_return(
+            self._s([100, 102, 101, 103, 108]), 0, 4, 10.0)
+        self.assertFalse(stopped)
+        self.assertEqual(days, 4)
+        self.assertAlmostEqual(ret, 8.0)
+
+    def test_invalid_returns_none(self):
+        import verifier
+        self.assertEqual(
+            verifier._trailing_stop_return(self._s([100, 101]), 0, 0, 10.0),
+            (None, None, False))
+
+
 class MarketRegimeTests(unittest.TestCase):
     def _series(self, values):
         return pd.Series([float(v) for v in values])

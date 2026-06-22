@@ -3047,6 +3047,23 @@ if st.session_state.get("_view_mode") == "verifier":
                 help="초과수익이 양수인 종목 비율. 50% 넘으면 점수가 시장 평균을 이긴다는 신호.",
             )
 
+            trail_avg = result.get("overall_avg_trail")
+            if trail_avg is not None:
+                tp = result.get("trail_pct", 10.0)
+                row3 = st.columns(3)
+                row3[0].metric(
+                    "손절 적용 평균", f"{trail_avg:+.2f}%",
+                    help=f"고점 대비 {tp:.0f}% 빠지면 파는 '트레일링 스톱'을 적용한 평균 수익률. "
+                         "끝까지 보유 대신 하락을 잘라낸 가상 성과. % 는 사이드바에서 조정.",
+                )
+                twr = result.get("overall_win_rate_trail")
+                row3[1].metric("손절 적용 승률", f"{twr}%" if twr is not None else "-")
+                stopped = result.get("trail_stopped_count", 0)
+                row3[2].metric(
+                    "손절 발동", f"{stopped}/{result['total_count']}건",
+                    help="트레일링 스톱이 실제로 걸려 중간에 청산된 종목 수.",
+                )
+
             excluded = result.get("excluded_short_hold", 0)
             if excluded > 0:
                 if horizon == "all":
@@ -3078,6 +3095,7 @@ if st.session_state.get("_view_mode") == "verifier":
                     "발굴가": f"{r['added_close']:,.0f}",
                     "현재가": f"{r['current_close']:,.0f}",
                     "수익률(%)": r["return_pct"],
+                    "손절적용(%)": r.get("trail_return_pct") if r.get("trail_return_pct") is not None else "-",
                     "시장(%)": r.get("market_return_pct") if r.get("market_return_pct") is not None else "-",
                     "초과(%p)": r.get("excess_return_pct") if r.get("excess_return_pct") is not None else "-",
                     "유니버스": r.get("universe", ""),

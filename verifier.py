@@ -287,6 +287,37 @@ def _bucket_stats(
     return out
 
 
+# 트레일링 스톱 — 발굴 후 종가 기준으로 고점 대비 이만큼 빠지면 청산(손절).
+# "사서 끝까지 보유" 대신 하락을 잘라낸 가상 수익을 함께 보기 위함.
+# portfolio 설정의 trail_pct(기본 10%)를 따른다.
+DEFAULT_TRAIL_PCT = 10.0
+
+
+def _trailing_stop_return(close, start_idx, end_idx, trail_pct):
+    """start_idx 종가에 진입한 뒤 종가 기준 트레일링 스톱을 적용한 수익률.
+
+    진입 후 최고 종가 대비 trail_pct% 이상 하락한 첫날 종가에 청산한다. 끝까지
+    안 걸리면 end_idx 종가까지 보유. 종가 기준이라 장중 변동은 무시(보수적).
+
+    Returns: (수익률%, 청산까지 영업일수, 스톱 발동 여부). 계산 불가 시 (None, None, False).
+    """
+    if close is None or start_idx is None or end_idx is None or end_idx <= start_idx:
+        return None, None, False
+    start = float(close.iloc[start_idx])
+    if start <= 0:
+        return None, None, False
+    thresh = 1.0 - max(0.0, float(trail_pct)) / 100.0
+    peak = start
+    for i in range(start_idx + 1, end_idx + 1):
+        c = float(close.iloc[i])
+        if c > peak:
+            peak = c
+        if c <= peak * thresh:
+            return (c / start - 1) * 100, i - start_idx, True
+    end = float(close.iloc[end_idx])
+    return (end / start - 1) * 100, end_idx - start_idx, False
+
+
 # ─────────── 메인: 발굴 가상 매매 검증 ───────────
 def verify_scouted(
     score_type: str = "total",
@@ -312,13 +343,19 @@ def verify_scouted(
         total_count: 통계 포함 종목 수
         excluded_short_hold: min_hold_days 미달로 제외된 종목 수
         missing_data_count: 점수·가격 데이터 없어 검증 불가능한 종목 수
-        overall_*: 전체 평균/중앙값/승률 (절대 + 초과)
+        overall_*: 전체 평균/중앙값/승률 (절대 + 초과 + 트레일링 스톱 적용)
         score_type, horizon, min_hold_days: echo back
     """
     if score_type not in SCORE_TYPES:
         score_type = "total"
     if horizon not in HORIZONS:
         horizon = "all"
+
+    try:
+        import portfolio
+        trail_pct = float(portfolio.load_settings().get("trail_pct", DEFAULT_TRAIL_PCT))
+    except Exception:
+        trail_pct = DEFAULT_TRAIL_PCT
 
     items = scouted.load_scouted()
     today = _today_key()
@@ -363,6 +400,11 @@ def verify_scouted(
 
         ret_pct = (end_close / start_close - 1) * 100
 
+        # 트레일링 스톱 적용 수익 — 하락을 잘라낸 가상 성과 (start_idx 복원: end - 보유일)
+        trail_ret, trail_days, trail_stopped = _trailing_stop_return(
+            series, end_idx - days_held, end_idx, trail_pct
+        )
+
         # 시장 대비 초과수익
         market = _safe_market_for_code(code)
         market_series = _fetch_market_series(market, today)
@@ -402,6 +444,9 @@ def verify_scouted(
             "current_close": end_close,
             "days_held": days_held,
             "return_pct": round(ret_pct, 2),
+            "trail_return_pct": round(trail_ret, 2) if trail_ret is not None else None,
+            "trail_days": trail_days,
+            "trail_stopped": bool(trail_stopped),
             "market": market,
             "market_return_pct": round(market_ret, 2) if market_ret is not None else None,
             "excess_return_pct": round(excess, 2) if excess is not None else None,
@@ -419,6 +464,7 @@ def verify_scouted(
 
     abs_vals = [r["return_pct"] for r in rows]
     ex_vals = [r["excess_return_pct"] for r in rows if r["excess_return_pct"] is not None]
+    trail_vals = [r["trail_return_pct"] for r in rows if r["trail_return_pct"] is not None]
 
     return {
         "rows": rows,
@@ -438,6 +484,13 @@ def verify_scouted(
             round(sum(1 for x in ex_vals if x > 0) / len(ex_vals) * 100, 1)
             if ex_vals else None
         ),
+        "overall_avg_trail": round(mean(trail_vals), 2) if trail_vals else None,
+        "overall_win_rate_trail": (
+            round(sum(1 for x in trail_vals if x > 0) / len(trail_vals) * 100, 1)
+            if trail_vals else None
+        ),
+        "trail_pct": trail_pct,
+        "trail_stopped_count": sum(1 for r in rows if r.get("trail_stopped")),
         "score_type": score_type,
         "horizon": horizon,
         "min_hold_days": min_hold_days,
