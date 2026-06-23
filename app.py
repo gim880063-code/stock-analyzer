@@ -3141,70 +3141,81 @@ if st.session_state.get("_view_mode") == "verifier":
         # 새 모듈 함수 호출 — 배포 직후 Streamlit 이 verifier 옛 모듈을 캐시하면
         # AttributeError 로 탭 전체가 죽을 수 있어 try/except 로 감싼다(Reboot 시 정상).
         try:
-            wf_st = st.session_state.get("sim_score_type", "total")
-            wf_label = {"total": "종합", "short_term": "단기",
-                        "mid_term": "중기", "focus": "집중"}.get(wf_st, "종합")
-            st.markdown(f"##### 🎯 {wf_label} 점수 walk-forward 예측력")
+            st.markdown("##### 🎯 walk-forward 예측력 — 종합 vs 집중")
             st.caption(
-                f"그날 '{wf_label}' 점수로 *그 이후* 수익률을 **날짜별로 따로** 채점(rank-IC)한 뒤 평균낸 값. "
-                "각 날짜가 미래를 안 쓰는 out-of-sample 이라, 점수가 내일 이후 수익을 "
-                "실제로 변별하는지 가장 정직하게 보여줍니다. (발굴 탭의 '점수 종류' 선택을 따릅니다)"
+                "그날 점수로 *그 이후* 수익률을 **날짜별로 따로** 채점(rank-IC)한 뒤 평균낸 값. "
+                "미래를 안 쓰는 out-of-sample 이라 가장 정직한 비교입니다. "
+                "종합(9개 항목 가중)과 집중(상대강도·재무·가치)을 나란히 봅니다."
             )
-            wf = verifier.verify_composite_walk_forward(forward_days=forward_days, score_type=wf_st)
-            if wf["n_periods"] == 0:
+            _wf = {}
+            _wf_rows = []
+            for _stp, _slabel in (("total", "종합"), ("focus", "집중")):
+                _w = verifier.verify_composite_walk_forward(forward_days=forward_days, score_type=_stp)
+                _wf[_stp] = _w
+                if _w["n_periods"] == 0:
+                    _wf_rows.append({"점수": _slabel, "평균 IC": None, "t값": None,
+                                     "IC 양수%": None, "상·하위⅓ 수익차(%p)": None, "기간수": 0})
+                else:
+                    _wf_rows.append({
+                        "점수": _slabel,
+                        "평균 IC": round(_w["mean_ic"], 3),
+                        "t값": round(_w["t_stat"], 2) if _w["t_stat"] is not None else None,
+                        "IC 양수%": _w["pct_ic_positive"],
+                        "상·하위⅓ 수익차(%p)": _w["mean_spread"],
+                        "기간수": _w["n_periods"],
+                    })
+            st.dataframe(
+                pd.DataFrame(_wf_rows), hide_index=True, use_container_width=True,
+                column_config={
+                    "평균 IC": st.column_config.Column(
+                        help="점수 순서와 이후 수익 순서가 맞는 정도 (-1~+1). 0.03~0.10이면 쓸 만, "
+                             "그 위면 좋음, 0 근처면 무관, 마이너스면 거꾸로."),
+                    "t값": st.column_config.Column(
+                        help="그 IC가 우연 아닌지. 절댓값 2 넘으면 '믿을 만'. 표본 적으면 작게 나옴."),
+                    "IC 양수%": st.column_config.Column(
+                        help="여러 날 중 점수가 제대로(플러스로) 작동한 날 비율. 50% 넘으면 대체로 맞는 쪽."),
+                    "상·하위⅓ 수익차(%p)": st.column_config.Column(
+                        help="점수 상위 1/3이 하위 1/3보다 평균 몇 %p 더 벌었는지. 클수록 잘 가름."),
+                    "기간수": st.column_config.Column(
+                        help="채점에 쓴 날짜(기간) 수. 적을수록 잠정이고, 4 미만이면 신뢰 어려움."),
+                },
+            )
+
+            # 종합·집중 비교 + 표본 경고
+            _tt, _tf = _wf["total"], _wf["focus"]
+            _t_tot = _tt.get("t_stat") or 0.0
+            _t_foc = _tf.get("t_stat") or 0.0
+            _min_periods = min(_tt.get("n_periods", 0), _tf.get("n_periods", 0))
+            if _tt["n_periods"] == 0 and _tf["n_periods"] == 0:
                 st.info(
-                    "종합점수 검증 데이터가 부족합니다 — '한 날짜에 15종목 이상'이 "
+                    "검증 데이터가 부족합니다 — '한 날짜에 15종목 이상'이 "
                     f"'{verifier.WF_MIN_PERIODS}일 이상' 쌓여야 합니다. 매일 스크리닝이 돌면 자동 축적됩니다."
                 )
+            elif _tt.get("insufficient") or _tf.get("insufficient"):
+                _better = "집중" if _t_foc > _t_tot else "종합"
+                st.warning(
+                    f"⚠️ 표본 부족(기간 {_min_periods}개) — **방향만** 참고하세요. "
+                    f"지금은 '{_better}' 점수의 t값이 더 높지만, 숫자는 데이터가 더 쌓여야 믿을 만합니다."
+                )
+            elif _t_foc >= 2 and _t_foc > _t_tot:
+                st.success(
+                    f"✅ '집중' 점수가 종합보다 더 잘 예측합니다 "
+                    f"(집중 t={_t_foc:+.2f} vs 종합 t={_t_tot:+.2f}). 집중 가설을 데이터가 지지합니다."
+                )
+            elif _t_tot >= 2:
+                st.success(
+                    f"✅ '종합' 점수가 {forward_days}일 수익을 유의하게 예측합니다 "
+                    f"(종합 t={_t_tot:+.2f}, 집중 t={_t_foc:+.2f})."
+                )
             else:
-                c1, c2, c3, c4 = st.columns(4)
-                c1.metric(
-                    "평균 IC", f"{wf['mean_ic']:+.3f}",
-                    help="점수 순서와 이후 수익 순서가 맞아떨어지는 정도 (-1~+1). "
-                         "+면 점수 높은 종목이 더 올랐다는 뜻. 0.03~0.10이면 쓸 만, "
-                         "그 위면 좋음, 0 근처면 무관, 마이너스면 거꾸로 작동.",
+                st.info(
+                    f"➖ 둘 다 통계적으로 뚜렷하지 않습니다 (종합 t={_t_tot:+.2f}, 집중 t={_t_foc:+.2f}). "
+                    "선별 필터로만 쓰고 단일 종목 신호로 과신하지 마세요."
                 )
-                c2.metric(
-                    "t값", f"{wf['t_stat']:+.2f}" if wf["t_stat"] is not None else "-",
-                    help="위 IC가 우연인지 진짜인지 재는 값. 절댓값이 2를 넘으면 "
-                         "'우연이라 보기 어렵다(믿을 만하다)'는 뜻. 표본이 적으면 작게 나옴.",
-                )
-                c3.metric(
-                    "IC 양수 비율", f"{wf['pct_ic_positive']:.0f}%",
-                    help="여러 날 중 점수가 제대로(플러스로) 작동한 날의 비율. "
-                         "50%를 넘으면 대체로 맞는 쪽, 높을수록 꾸준히 통한다는 뜻.",
-                )
-                c4.metric(
-                    "상·하위⅓ 수익차", f"{wf['mean_spread']:+.2f}%p",
-                    help="점수 상위 1/3 종목이 하위 1/3보다 평균 몇 %p 더 벌었는지. "
-                         "클수록(+) 점수가 좋은 종목과 나쁜 종목을 잘 가른다는 뜻.",
-                )
-
-                _ic, _t = wf["mean_ic"], (wf["t_stat"] or 0.0)
-                if wf["insufficient"]:
-                    st.warning(
-                        f"⚠️ 표본 부족 (기간 {wf['n_periods']}개) — 참고만 하세요. "
-                        "데이터가 더 쌓여야 신뢰할 수 있습니다."
-                    )
-                elif _ic > 0.03 and _t >= 2:
-                    st.success(
-                        f"✅ 종합점수가 {forward_days}일 수익을 **유의하게 예측**합니다 "
-                        f"(점수 높을수록 더 오름, t={_t:+.2f})."
-                    )
-                elif _ic < -0.03 and _t <= -2:
-                    st.error(
-                        f"🚨 **역방향** — 점수가 높을수록 오히려 덜 올랐습니다 (t={_t:+.2f}). "
-                        "종합점수 설계 재검토가 필요합니다."
-                    )
-                else:
-                    st.info(
-                        f"➖ 예측력이 통계적으로 뚜렷하지 않습니다 (t={_t:+.2f}). "
-                        "선별 필터로는 쓰되 단일 종목 매수 신호로 과신하지 마세요."
-                    )
-                st.caption(
-                    f"기간 {wf['n_periods']}개 · 관측 {wf['n_obs']:,}건 · {forward_days}일 뒤 시장 대비. "
-                    "t값 |2| 이상이면 통계적으로 유의, IC는 0.03~0.10이면 쓸 만한 신호로 봅니다."
-                )
+            st.caption(
+                f"{forward_days}일 뒤 시장 대비 기준. t값 |2| 이상이면 유의, IC 0.03~0.10이면 쓸 만한 신호. "
+                "기간(날짜) 수가 적을수록 잠정이며, 같은 종목이 여러 날 겹쳐 실제 유효 표본은 더 작습니다."
+            )
             st.divider()
         except Exception as _wf_err:
             st.caption(
