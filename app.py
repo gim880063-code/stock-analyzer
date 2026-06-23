@@ -2916,11 +2916,12 @@ if st.session_state.get("_view_mode") == "verifier":
         with col_score:
             score_type = st.radio(
                 "점수 종류",
-                options=["total", "short_term", "mid_term"],
+                options=["total", "short_term", "mid_term", "focus"],
                 format_func=lambda t: {
                     "total": "종합 (가중)",
                     "short_term": "단기 (거래량·수급·공시·시장강도)",
                     "mid_term": "중기 (추세·가치·재무·성장성)",
+                    "focus": "집중 (상대강도·재무·가치)",
                 }[t],
                 horizontal=True,
                 key="sim_score_type",
@@ -3122,13 +3123,16 @@ if st.session_state.get("_view_mode") == "verifier":
         # 새 모듈 함수 호출 — 배포 직후 Streamlit 이 verifier 옛 모듈을 캐시하면
         # AttributeError 로 탭 전체가 죽을 수 있어 try/except 로 감싼다(Reboot 시 정상).
         try:
-            st.markdown("##### 🎯 종합점수 walk-forward 예측력")
+            wf_st = st.session_state.get("sim_score_type", "total")
+            wf_label = {"total": "종합", "short_term": "단기",
+                        "mid_term": "중기", "focus": "집중"}.get(wf_st, "종합")
+            st.markdown(f"##### 🎯 {wf_label} 점수 walk-forward 예측력")
             st.caption(
-                "그날 종합점수로 *그 이후* 수익률을 **날짜별로 따로** 채점(rank-IC)한 뒤 평균낸 값. "
-                "각 날짜가 미래를 안 쓰는 out-of-sample 이라, 종합점수가 내일 이후 수익을 "
-                "실제로 변별하는지 가장 정직하게 보여줍니다."
+                f"그날 '{wf_label}' 점수로 *그 이후* 수익률을 **날짜별로 따로** 채점(rank-IC)한 뒤 평균낸 값. "
+                "각 날짜가 미래를 안 쓰는 out-of-sample 이라, 점수가 내일 이후 수익을 "
+                "실제로 변별하는지 가장 정직하게 보여줍니다. (발굴 탭의 '점수 종류' 선택을 따릅니다)"
             )
-            wf = verifier.verify_composite_walk_forward(forward_days=forward_days)
+            wf = verifier.verify_composite_walk_forward(forward_days=forward_days, score_type=wf_st)
             if wf["n_periods"] == 0:
                 st.info(
                     "종합점수 검증 데이터가 부족합니다 — '한 날짜에 15종목 이상'이 "

@@ -527,6 +527,15 @@ class ScoreNameAliasTests(unittest.TestCase):
         self.assertEqual(verifier._extract_score(info, "mid_term"), 4)
 
 
+class FocusScoreTests(unittest.TestCase):
+    def test_focus_extracts_only_focus_items(self):
+        import verifier
+        # 집중 = 시장 상대강도(가중 2) + 재무 건전성(1) + 가치(1), 나머지 항목은 제외
+        info = {"added_scores": {"시장 상대강도": 1, "재무 건전성": 1, "가치": 1,
+                                 "추세": 1, "수급": 1}}
+        self.assertEqual(verifier._extract_score(info, "focus"), 4)
+
+
 class TrailingStopTests(unittest.TestCase):
     def _s(self, vals):
         return pd.Series([float(v) for v in vals])

@@ -32,12 +32,12 @@ from statistics import mean, median, stdev
 import pandas as pd
 import FinanceDataReader as fdr
 
-from analyzer import SHORT_TERM_ITEMS, MID_TERM_ITEMS, weighted_score, _stock_market
+from analyzer import SHORT_TERM_ITEMS, MID_TERM_ITEMS, FOCUS_ITEMS, weighted_score, _stock_market
 import history
 import scouted
 
 
-SCORE_TYPES = ("total", "short_term", "mid_term")
+SCORE_TYPES = ("total", "short_term", "mid_term", "focus")
 
 # 시뮬레이션에서 사용하는 고정 보유 기간 옵션.
 # "all" 은 발굴일부터 현재(마지막 거래일)까지의 총 수익률.
@@ -180,6 +180,8 @@ def _extract_score(info: dict, score_type: str) -> int | None:
         items = SHORT_TERM_ITEMS
     elif score_type == "mid_term":
         items = MID_TERM_ITEMS
+    elif score_type == "focus":
+        items = FOCUS_ITEMS
     else:
         return None
     score_items = [
@@ -209,6 +211,8 @@ def _extract_score_from_entry(entry: dict, score_type: str) -> int | None:
         items = SHORT_TERM_ITEMS
     elif score_type == "mid_term":
         items = MID_TERM_ITEMS
+    elif score_type == "focus":
+        items = FOCUS_ITEMS
     else:
         return None
     score_items = [
@@ -670,6 +674,8 @@ def _composite_score_from_entry(e: dict, score_type: str = "total") -> float | N
             return float(weighted_score(items, SHORT_TERM_ITEMS)[0])
         if score_type == "mid_term":
             return float(weighted_score(items, MID_TERM_ITEMS)[0])
+        if score_type == "focus":
+            return float(weighted_score(items, FOCUS_ITEMS)[0])
         return float(weighted_score(items)[0])
     if score_type == "total" and e.get("total") is not None:
         return float(e["total"])
