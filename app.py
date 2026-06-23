@@ -2931,6 +2931,15 @@ if st.session_state.get("_view_mode") == "verifier":
                     "모멘텀·가격리스크는 의심 항목이라 종합점수에만 포함."
                 ),
             )
+
+        # 점수 종류를 바꾸면 보유 시계를 권장값으로 자동 맞춤 (안내형). 단기→5일,
+        # 종합·집중→20일, 중기→60일. 사용자가 horizon 을 직접 바꾼 뒤 점수 종류를
+        # 그대로 두면 그 선택은 유지된다(권장은 점수 종류가 바뀔 때만 다시 적용).
+        _REC_HORIZON = {"short_term": "5d", "total": "20d", "focus": "20d", "mid_term": "60d"}
+        if st.session_state.get("_prev_sim_score_type") != score_type:
+            st.session_state["_prev_sim_score_type"] = score_type
+            st.session_state["sim_horizon"] = _REC_HORIZON.get(score_type, "20d")
+
         with col_horizon:
             horizon = st.radio(
                 "보유 시계",
@@ -2947,6 +2956,15 @@ if st.session_state.get("_view_mode") == "verifier":
                     "5/20/60일은 같은 보유기간으로 비교 — 시계 도달 못 한 종목은 자동 제외. "
                     "'발굴일~현재'는 보유기간이 종목마다 다르고 시장 흐름에 영향 받음."
                 ),
+            )
+
+        _rec = _REC_HORIZON.get(score_type)
+        if _rec and horizon not in (_rec, "all"):
+            _hl = {"5d": "5일", "20d": "20일", "60d": "60일", "all": "발굴~현재"}
+            _sl = {"total": "종합", "short_term": "단기", "mid_term": "중기", "focus": "집중"}
+            st.caption(
+                f"⚠️ '{_sl.get(score_type, score_type)}' 점수는 **{_hl[_rec]} 보유**와 잘 맞아요. "
+                f"지금 {_hl[horizon]}은 신호와 기간이 어긋나 결과가 약해 보일 수 있어요."
             )
 
         min_hold_days = 0
