@@ -54,10 +54,19 @@ def price_history(market: str, code: str, start: date) -> pd.Series | None:
 
 
 def usdkrw_history(start: date) -> pd.Series | None:
-    """start 이후 원/달러 일별 환율 시리즈. 실패 시 None."""
+    """start 이후 원/달러 일별 환율 시리즈 (서울 날짜 기준). 실패 시 None.
+
+    글로벌 FX 일봉은 뉴욕 기준이라 일~목요일에 라벨이 찍히고, 라벨 D 봉이
+    실제로는 서울 D+1 거래일의 환율이다. 하루 밀어 서울 날짜(월~금)에 맞춘다.
+    검증: 서울 2023-06-29 고시 ≈1,310원 = 원본 6/28 봉 1,309.01 /
+          서울 2023-07-14 ≈1,268원 = 원본 7/13 봉 1,266.83.
+    """
     def fetch():
-        df = fdr.DataReader("USD/KRW", start.isoformat())
-        return df["Close"].dropna()
+        # 하루 시프트 후에도 start 시점 값이 있도록 며칠 앞서 조회
+        df = fdr.DataReader("USD/KRW", (start - timedelta(days=4)).isoformat())
+        s = df["Close"].dropna()
+        s.index = s.index + pd.Timedelta(days=1)
+        return s
     return _cached_fetch(("fx", start.isoformat()), fetch)
 
 

@@ -267,10 +267,51 @@ with st.expander("➕ 매매 입력 (매수/매도)", expanded=not trades):
             st.error(f"저장 실패: {type(e).__name__}: {e}")
 
 # ─────────── 배당금·세금·기타 입력 ───────────
+
+def _pick_stock(key_prefix: str) -> tuple[str, str, str]:
+    """종목 선택 — 보유 종목 드롭다운 우선, '직접 입력'으로 임의 종목도 가능.
+
+    반환: (market, code, name). 직접 입력에서 아직 안 채웠으면 code가 빈 문자열.
+    """
+    DIRECT = "✏️ 직접 입력 (보유 종목에 없음)"
+    labels, meta = [], {}
+    for (mkt, code), p in sorted(positions.items(), key=lambda kv: (kv[0][0], kv[1]["name"])):
+        label = f"{'🇰🇷' if mkt == 'KR' else '🇺🇸'} {p['name']} ({code})"
+        labels.append(label)
+        meta[label] = (mkt, code, p["name"])
+    if labels:
+        sel = st.selectbox(
+            "종목 — 보유 중인 종목에서 선택",
+            options=labels + [DIRECT],
+            key=f"{key_prefix}_stock_sel",
+        )
+    else:
+        sel = DIRECT
+    if sel != DIRECT:
+        return meta[sel]
+    _mk = st.radio("시장", ["🇰🇷 한국", "🇺🇸 미국"], horizontal=True, key=f"{key_prefix}_market")
+    market = "KR" if _mk.endswith("한국") else "US"
+    if market == "KR":
+        try:
+            sd = _krx_names()
+        except Exception:
+            sd = {}
+        if sd:
+            kr_opts = [f"{n} {c}" for c, n in sorted(sd.items(), key=lambda kv: kv[1])]
+            s2 = st.selectbox("종목 검색 (한글 이름 또는 코드)", options=kr_opts, key=f"{key_prefix}_kr")
+            code = s2.rsplit(maxsplit=1)[-1]
+            return market, code, sd.get(code, code)
+        code = st.text_input("종목코드 (6자리)", max_chars=6, key=f"{key_prefix}_krcode").strip()
+        return market, code, code
+    code = st.text_input("티커 (예: AAPL)", key=f"{key_prefix}_us").strip().upper()
+    return market, code, code
+
+
 with st.expander(f"💵 배당금·세금·기타 입력 ({len(incomes)}건)"):
     st.caption(
-        "배당금은 계좌에 **실제 입금된 금액을 그대로** 넣으면 됩니다 (세금 계산 불필요). "
-        "해외주식 양도소득세, 출금·이체 수수료 같은 것은 '세금·비용'으로 남길 수 있습니다. "
+        "배당금은 계좌에 **입금된 금액 그대로**, 함께 빠져나간 **세금 출금(해외)** 도 옆 칸에 "
+        "같이 넣으면 한 번에 저장됩니다 (증권사 거래내역과 같은 구성). "
+        "양도소득세·출금 수수료 등은 '세금·비용'으로 남기세요. "
         "**여기 기록은 아래 배당금·세금 섹션에 따로 모이며, "
         "평가액·실현손익·수익률에는 반영되지 않습니다** (배당 재투자분은 매수 기록으로 잡히니까요)."
     )
@@ -287,32 +328,24 @@ with st.expander(f"💵 배당금·세금·기타 입력 ({len(incomes)}건)"):
             key="inc_date",
         )
     inc_payload = None
+    tax_payload = None  # 배당과 함께 기록하는 '세금 출금(해외)'
     if inc_type_kor.endswith("배당금"):
-        with j1:
-            inc_market_kor = st.radio("시장", ["🇰🇷 한국", "🇺🇸 미국"], horizontal=True, key="inc_market")
-            inc_market = "KR" if inc_market_kor.endswith("한국") else "US"
         with j2:
-            inc_code, inc_name = "", ""
-            if inc_market == "KR":
-                try:
-                    _sd2 = _krx_names()
-                except Exception:
-                    _sd2 = {}
-                if _sd2:
-                    _opts2 = [f"{n} {c}" for c, n in sorted(_sd2.items(), key=lambda kv: kv[1])]
-                    _sel2 = st.selectbox("종목", options=_opts2, key="inc_kr_stock")
-                    inc_code = _sel2.rsplit(maxsplit=1)[-1]
-                    inc_name = _sd2.get(inc_code, inc_code)
-                else:
-                    inc_code = st.text_input("종목코드 (6자리)", max_chars=6, key="inc_kr_code").strip()
-                    inc_name = inc_code
-            else:
-                inc_code = st.text_input("티커 (예: AAPL)", key="inc_us_ticker").strip().upper()
-                inc_name = inc_code
-            inc_amount = st.number_input(
-                "받은 배당금 — 계좌에 입금된 금액 그대로 (" + ("원)" if inc_market == "KR" else "달러)"),
-                min_value=0.0, step=1.0, value=0.0, format="%.2f", key=f"inc_amt_{igen}",
-            )
+            inc_market, inc_code, inc_name = _pick_stock("inc_div")
+            _cur = "원" if inc_market == "KR" else "달러"
+            k1, k2 = st.columns(2)
+            with k1:
+                inc_amount = st.number_input(
+                    f"배당금 입금액 ({_cur})",
+                    min_value=0.0, step=1.0, value=0.0, format="%.2f", key=f"inc_amt_{igen}",
+                )
+            with k2:
+                tax_out = st.number_input(
+                    f"세금 출금 — 함께 기록 (선택, {_cur})",
+                    min_value=0.0, step=0.01, value=0.0, format="%.2f", key=f"inc_taxout_{igen}",
+                    help="증권사 내역의 '세금출금(해외)'처럼 배당과 함께 빠져나간 세금. "
+                         "입력하면 이 종목의 세금으로 세금 섹션에 같이 저장됩니다. 없으면 0.",
+                )
             inc_fx = 1.0
             if inc_market == "US":
                 _fx_def = quotes.usdkrw_at(inc_date) or fx_now or 1300.0
@@ -321,13 +354,24 @@ with st.expander(f"💵 배당금·세금·기타 입력 ({len(incomes)}건)"):
                     min_value=0.0, step=0.1, value=float(_fx_def), format="%.2f",
                     key=f"inc_fx_{igen}_{inc_date.isoformat()}",
                 )
-                if inc_amount > 0:
-                    st.caption(f"→ 원화 환산 {inc_amount * inc_fx:,.0f}원")
+            if inc_amount > 0:
+                _msg = f"→ 배당 {inc_amount * inc_fx:,.0f}원"
+                if tax_out > 0:
+                    _msg += f" 입금 · 세금 출금 {tax_out * inc_fx:,.0f}원 함께 기록"
+                st.caption(_msg)
         inc_payload = {
             "type": "dividend", "date": inc_date.isoformat(), "market": inc_market,
             "code": inc_code, "name": inc_name, "amount": inc_amount,
             "fx": inc_fx,
         }
+        if tax_out > 0:
+            tax_payload = {
+                "type": "expense", "date": inc_date.isoformat(),
+                "name": "세금출금(해외)" if inc_market == "US" else "세금출금",
+                "amount": tax_out,
+                "currency": "USD" if inc_market == "US" else "KRW", "fx": inc_fx,
+                "market": inc_market, "code": inc_code, "stock_name": inc_name,
+            }
     else:
         is_expense = "세금" in inc_type_kor
         exp_market, exp_code, exp_stock_name = "", "", ""
@@ -344,26 +388,7 @@ with st.expander(f"💵 배당금·세금·기타 입력 ({len(incomes)}건)"):
                     value=False, key="inc_linkstock",
                 )
                 if link_stock:
-                    exp_market_kor = st.radio(
-                        "시장", ["🇰🇷 한국", "🇺🇸 미국"], horizontal=True, key="inc_exp_market",
-                    )
-                    exp_market = "KR" if exp_market_kor.endswith("한국") else "US"
-                    if exp_market == "KR":
-                        try:
-                            _sd3 = _krx_names()
-                        except Exception:
-                            _sd3 = {}
-                        if _sd3:
-                            _opts3 = [f"{n} {c}" for c, n in sorted(_sd3.items(), key=lambda kv: kv[1])]
-                            _sel3 = st.selectbox("종목", options=_opts3, key="inc_exp_kr_stock")
-                            exp_code = _sel3.rsplit(maxsplit=1)[-1]
-                            exp_stock_name = _sd3.get(exp_code, exp_code)
-                        else:
-                            exp_code = st.text_input("종목코드 (6자리)", max_chars=6, key="inc_exp_kr_code").strip()
-                            exp_stock_name = exp_code
-                    else:
-                        exp_code = st.text_input("티커 (예: TSLA)", key="inc_exp_us_ticker").strip().upper()
-                        exp_stock_name = exp_code
+                    exp_market, exp_code, exp_stock_name = _pick_stock("inc_exp")
             inc_cur_kor = st.radio("통화", ["원화", "달러"], horizontal=True, key="inc_cur")
             inc_currency = "KRW" if inc_cur_kor == "원화" else "USD"
             inc_amount = st.number_input(
@@ -388,7 +413,11 @@ with st.expander(f"💵 배당금·세금·기타 입력 ({len(incomes)}건)"):
     if st.button("💾 내역 저장", type="primary", use_container_width=True, key="inc_save"):
         try:
             e = journal.add_income(inc_payload)
-            st.success(f"저장됨: {e['date']} {e['name']} {journal.income_net_krw(e):+,.0f}원")
+            _ok = f"저장됨: {e['date']} {e['name']} {journal.income_net_krw(e):+,.0f}원"
+            if tax_payload is not None:
+                t = journal.add_income(tax_payload)
+                _ok += f" · 세금출금 {abs(journal.income_net_krw(t)):,.0f}원 함께 기록"
+            st.success(_ok)
             st.session_state["income_form_gen"] = igen + 1
             st.rerun()
         except ValueError as e:
