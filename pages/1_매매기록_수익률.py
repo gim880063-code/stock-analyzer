@@ -152,7 +152,11 @@ c4.metric(
     f"{year_now['pnl_krw']:+,.0f}원" if year_now else None,
 )
 c5.metric("환율 USD/KRW", f"{fx_now:,.2f}원" if fx_now else "조회 실패")
-st.caption("가격은 최근 종가 기준(실시간 아님). 미국 주식 평가는 현재 환율로 환산합니다.")
+st.caption(
+    "가격은 최근 종가 기준(실시간 아님). 미국 주식 평가는 현재 시장환율로 환산합니다 — "
+    "증권사(삼성증권) 앱의 평가금액과는 고시환율·스프레드 차이로 소폭 다를 수 있습니다. "
+    "매매 자체는 입력한 체결 환율로 계산되므로 실현손익은 계좌와 일치합니다."
+)
 if unpriced:
     st.warning(f"⚠️ {unpriced}개 종목의 현재가 조회에 실패해 매입가로 평가했습니다. (티커 확인 필요)")
 for w in warnings:
@@ -167,6 +171,9 @@ if not trades:
     )
 
 with st.expander("➕ 매매 입력 (매수/매도)", expanded=not trades):
+    # 저장 성공 시 세대(gen)를 올려 수량·단가·수수료 입력칸을 깨끗이 비운다
+    # (직전 입력값이 남아 실수로 중복 저장·잘못된 환율 역산되는 걸 방지).
+    gen = st.session_state.setdefault("trade_form_gen", 0)
     in1, in2, in3 = st.columns([1, 1, 2])
     with in1:
         market_kor = st.radio("시장", ["🇰🇷 한국", "🇺🇸 미국"], horizontal=True, key="in_market")
@@ -179,7 +186,7 @@ with st.expander("➕ 매매 입력 (매수/매도)", expanded=not trades):
             min_value=datetime(2000, 1, 1).date(), max_value=journal.today_kst(),
             key="in_date",
         )
-        qty = st.number_input("수량 (주)", min_value=0.0, step=1.0, value=0.0, key="in_qty")
+        qty = st.number_input("수량 (주)", min_value=0.0, step=1.0, value=0.0, key=f"in_qty_{gen}")
     with in3:
         code, name = "", ""
         if market == "KR":
@@ -198,23 +205,36 @@ with st.expander("➕ 매매 입력 (매수/매도)", expanded=not trades):
             else:
                 code = st.text_input("종목코드 (6자리)", max_chars=6, key="in_kr_code").strip()
                 name = st.text_input("종목명", key="in_kr_name").strip() or code
-            price = st.number_input("단가 (원)", min_value=0.0, step=100.0, value=0.0, key="in_price_kr")
+            price = st.number_input("단가 (원)", min_value=0.0, step=100.0, value=0.0, key=f"in_price_kr_{gen}")
             fx, fee_label = 1.0, "수수료+세금 (원)"
         else:
             code = st.text_input("티커 (예: AAPL, TSLA)", key="in_us_ticker").strip().upper()
             name = code
             price = st.number_input("단가 (달러)", min_value=0.0, step=0.01, value=0.0,
-                                    format="%.2f", key="in_price_us")
+                                    format="%.2f", key=f"in_price_us_{gen}")
             fx_default = quotes.usdkrw_at(trade_date) or fx_now or 1300.0
             # key 에 날짜를 넣어 체결일을 바꾸면 그 날짜의 환율이 새로 채워지게 함
             fx = st.number_input(
-                "체결 환율 (원/달러) — 자동 조회됨, 수정 가능",
+                "체결 환율 (원/달러) — 시장환율 자동 조회, 수정 가능",
                 min_value=0.0, step=0.1, value=float(fx_default), format="%.2f",
-                key=f"in_fx_{trade_date.isoformat()}",
+                key=f"in_fx_{gen}_{trade_date.isoformat()}",
             )
+            # 삼성증권 등 증권사는 자체 고시환율(스프레드 포함)로 환전하므로 시장환율과
+            # 다르다. 증권사 앱의 원화 결제금액을 그대로 넣으면 실제 적용 환율을 역산.
+            krw_amount = st.number_input(
+                "원화 결제금액 (선택) — 증권사 앱에 표시된 원화 금액",
+                min_value=0.0, step=1000.0, value=0.0, format="%.0f",
+                key=f"in_krw_{gen}",
+                help="삼성증권 앱의 체결내역에 나오는 원화 금액(수수료 제외 체결금액)을 입력하면 "
+                     "환율을 자동 역산해 실제 계좌와 정확히 일치시킵니다. "
+                     "매수는 결제한 원화, 매도는 수령한 원화 기준. 비워두면 위 환율을 사용.",
+            )
+            if krw_amount > 0 and qty > 0 and price > 0:
+                fx = krw_amount / (qty * price)
+                st.caption(f"→ 적용 환율 {fx:,.2f}원/달러 (원화 결제금액에서 역산)")
             fee_label = "수수료 (달러)"
-        fee = st.number_input(fee_label, min_value=0.0, step=0.01, value=0.0, key="in_fee")
-        note = st.text_input("메모 (선택)", key="in_note")
+        fee = st.number_input(fee_label, min_value=0.0, step=0.01, value=0.0, key=f"in_fee_{gen}")
+        note = st.text_input("메모 (선택)", key=f"in_note_{gen}")
 
     if st.button("💾 기록 저장", type="primary", use_container_width=True):
         try:
@@ -224,6 +244,7 @@ with st.expander("➕ 매매 입력 (매수/매도)", expanded=not trades):
                 "fx": fx, "fee": fee, "note": note,
             })
             st.success(f"저장됨: {t['date']} {t['name']} {side_kor} {t['qty']:g}주 @ {t['price']:,g}")
+            st.session_state["trade_form_gen"] = gen + 1  # 입력칸 초기화
             st.rerun()
         except ValueError as e:
             st.error(f"입력 오류: {e}")
