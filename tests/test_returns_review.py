@@ -1,0 +1,145 @@
+"""2026-07 수익률 점검 회귀 테스트 — 업종 상한, 무손실 아카이브, 시간 손절."""
+import sys
+import unittest
+from datetime import datetime, timedelta
+from pathlib import Path
+from unittest.mock import patch
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+import analyzer  # noqa: E402
+import history  # noqa: E402
+import holdings_monitor  # noqa: E402
+import screening_history  # noqa: E402
+
+
+class FakeStore:
+    def __init__(self):
+        self.data = {}
+
+    def load(self, filename, default):
+        return self.data.get(filename, default)
+
+    def save(self, filename, data):
+        self.data[filename] = data
+
+    def refresh(self):
+        return True
+
+
+def _r(code, name, total):
+    return {"code": code, "name": name, "total": total, "last_close": 1000}
+
+
+class SectorCapTests(unittest.TestCase):
+    IND = {"A1": "278", "A2": "278", "A3": "278", "B1": "300", "C1": None}
+
+    def _fn(self, code):
+        return self.IND.get(code)
+
+    def test_third_same_sector_demoted(self):
+        results = [_r("A1", "반도체1", 7), _r("A2", "반도체2", 6),
+                   _r("A3", "반도체3", 5), _r("B1", "인터넷1", 5)]
+        kept, demoted = analyzer.apply_sector_cap(results, industry_fn=self._fn)
+        self.assertEqual([r["code"] for r in kept], ["A1", "A2", "B1"])
+        self.assertEqual(len(demoted), 1)
+        self.assertEqual(demoted[0]["result"]["code"], "A3")
+        self.assertIn("업종 집중 상한", demoted[0]["reason"])
+        self.assertIn("반도체1", demoted[0]["reason"])  # 통과 종목명 명시
+
+    def test_unknown_sector_not_capped(self):
+        results = [_r("A1", "a", 7), _r("A2", "b", 6), _r("C1", "c", 5), _r("A3", "d", 4)]
+        kept, demoted = analyzer.apply_sector_cap(results, industry_fn=self._fn)
+        self.assertIn("C1", [r["code"] for r in kept])  # 업종 미확인 → 통과 유지
+        self.assertEqual([d["result"]["code"] for d in demoted], ["A3"])
+
+    def test_small_list_untouched(self):
+        results = [_r("A1", "a", 7), _r("A2", "b", 6)]
+        kept, demoted = analyzer.apply_sector_cap(results, industry_fn=self._fn)
+        self.assertEqual(len(kept), 2)
+        self.assertEqual(demoted, [])
+
+    def test_score_order_priority(self):
+        # 점수 내림차순 입력에서 상위 2개가 남아야 함
+        results = [_r("A3", "high", 9), _r("A1", "mid", 6), _r("A2", "low", 4)]
+        kept, demoted = analyzer.apply_sector_cap(results, industry_fn=self._fn)
+        self.assertEqual([r["code"] for r in kept], ["A3", "A1"])
+        self.assertEqual(demoted[0]["result"]["code"], "A2")
+
+
+class ScoreHistoryArchiveTests(unittest.TestCase):
+    def test_aged_entries_moved_not_deleted(self):
+        fake = FakeStore()
+        old_date = (datetime.now() - timedelta(days=400)).strftime("%Y-%m-%d")
+        mid_date = (datetime.now() - timedelta(days=10)).strftime("%Y-%m-%d")
+        fake.data[history.FILENAME] = {
+            "005930": [
+                {"date": old_date, "total": 3, "close": 100.0, "opinion": ""},
+                {"date": mid_date, "total": 5, "close": 110.0, "opinion": ""},
+            ],
+        }
+        with patch.object(history, "cloud_store", fake):
+            history.record_snapshot("005930", 6, 120.0, "매수")
+            main = fake.data[history.FILENAME]["005930"]
+            self.assertEqual([e["total"] for e in main], [5, 6])  # 오늘+최근만 본체
+            archive = fake.data[history.ARCHIVE_FILENAME]["005930"]
+            self.assertEqual([e["date"] for e in archive], [old_date])  # 삭제 아닌 이동
+            # load_all(include_archive=True) 로 병합 조회
+            merged = history.load_all(include_archive=True)["005930"]
+            self.assertEqual(len(merged), 3)
+            self.assertEqual(merged[0]["date"], old_date)
+
+    def test_archive_merge_no_duplicates(self):
+        fake = FakeStore()
+        old_date = (datetime.now() - timedelta(days=400)).strftime("%Y-%m-%d")
+        entry = {"date": old_date, "total": 3, "close": 100.0, "opinion": ""}
+        fake.data[history.FILENAME] = {"005930": [dict(entry)]}
+        fake.data[history.ARCHIVE_FILENAME] = {"005930": [dict(entry)]}  # 이미 아카이브됨
+        with patch.object(history, "cloud_store", fake):
+            history.record_snapshot("005930", 6, 120.0, "매수")
+            archive = fake.data[history.ARCHIVE_FILENAME]["005930"]
+            self.assertEqual(len(archive), 1)  # 중복 병합 안 됨
+
+
+class ScreeningHistoryArchiveTests(unittest.TestCase):
+    def test_old_dates_archived(self):
+        fake = FakeStore()
+        old_date = (datetime.now() - timedelta(days=120)).strftime("%Y-%m-%d")
+        fake.data[screening_history.FILENAME] = {
+            old_date: {"codes": ["005930"], "passed": {}, "dropped": {}, "params": {}, "ran_at": None},
+        }
+        with patch.object(screening_history, "cloud_store", fake):
+            screening_history.record_today(["000660"])
+            main = fake.data[screening_history.FILENAME]
+            self.assertNotIn(old_date, main)  # 본체에선 이동
+            archive = fake.data[screening_history.ARCHIVE_FILENAME]
+            self.assertIn(old_date, archive)  # 아카이브에 보존
+            self.assertEqual(archive[old_date]["codes"], ["005930"])
+
+
+class TimeStopTests(unittest.TestCase):
+    def _eval(self, added_days_ago, avg, current):
+        holding = {
+            "quantity": 10, "avg_price": avg,
+            "added_at": (datetime.now() - timedelta(days=added_days_ago)).strftime("%Y-%m-%d"),
+        }
+        analysis = {"last_close": current, "total": 2, "trade_plan": {"action": "보유"}}
+        return holdings_monitor.evaluate_holding("005930", "삼성전자", holding, analysis)
+
+    def test_stagnant_long_hold_alerts(self):
+        r = self._eval(120, avg=10000, current=9800)
+        msgs = [a["msg"] for a in r["alerts"]]
+        self.assertTrue(any("시간 손절 점검" in m for m in msgs), msgs)
+
+    def test_profitable_hold_no_time_alert(self):
+        r = self._eval(120, avg=10000, current=12000)
+        self.assertFalse(any("시간 손절" in a["msg"] for a in r["alerts"]))
+
+    def test_recent_hold_no_time_alert(self):
+        r = self._eval(30, avg=10000, current=9500)
+        self.assertFalse(any("시간 손절" in a["msg"] for a in r["alerts"]))
+
+
+if __name__ == "__main__":
+    unittest.main()

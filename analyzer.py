@@ -132,6 +132,61 @@ SCORE_WEIGHTS: dict[str, int] = {
 }
 
 
+# ─────────── 업종 집중 상한 ───────────
+# 스크리닝 통과 종목이 같은 업종(예: 반도체)에서만 우르르 나오면 포트폴리오가
+# 한 업종의 하락에 통째로 노출된다(상관 리스크). 통과 목록에서 같은 업종은
+# 점수 상위 N개만 남기고 나머지는 '관찰'로 전환해 추적은 계속한다.
+# N=2 근거: 통과가 보통 하루 0~5개라 상한 1은 후보를 지나치게 줄이고,
+# 3이면 사실상 무의미. 강한 업종에 2개까지는 허용하되 쏠림은 차단하는 균형점.
+SECTOR_CAP_MAX = 2
+
+
+def apply_sector_cap(
+    results: list[dict],
+    max_per_sector: int = SECTOR_CAP_MAX,
+    industry_fn=None,
+) -> tuple[list[dict], list[dict]]:
+    """점수 내림차순 통과 목록에 업종 상한 적용 → (통과 유지, 강등 목록).
+
+    강등 목록 항목: {"result": 원본 dict, "reason": 사람이 읽는 사유}.
+    업종을 확인 못 한 종목은 상한을 적용하지 않고 통과 유지(보수적 폴백 —
+    네이버 조회 실패가 통과 목록을 흔들지 않게).
+    """
+    if len(results) <= max_per_sector:
+        return list(results), []
+    if industry_fn is None:
+        from naver import get_industry_codes
+        ind_map = get_industry_codes([str(r.get("code")) for r in results])
+
+        def industry_fn(c: str):
+            return ind_map.get(c)
+
+    kept: list[dict] = []
+    demoted: list[dict] = []
+    count: dict[str, int] = {}
+    kept_names: dict[str, list[str]] = {}
+    for r in results:  # 입력이 이미 점수 내림차순이므로 상위 점수가 우선 통과
+        ind = industry_fn(str(r.get("code")))
+        if not ind:
+            kept.append(r)
+            continue
+        n = count.get(ind, 0)
+        if n < max_per_sector:
+            count[ind] = n + 1
+            kept_names.setdefault(ind, []).append(str(r.get("name", r.get("code"))))
+            kept.append(r)
+        else:
+            peers = ", ".join(kept_names.get(ind, [])[:max_per_sector])
+            demoted.append({
+                "result": r,
+                "reason": (
+                    f"업종 집중 상한 — 같은 업종에서 {peers} 통과(상한 {max_per_sector}개), "
+                    f"점수 {n + 1}번째라 관찰로 전환 (추적은 계속)"
+                ),
+            })
+    return kept, demoted
+
+
 # ─── 스크리닝 기준 종합점수 (코드 고정 — 사용자가 매번 고르지 않음) ───
 # 후보 통과 기준점수. UI/CLI 에서 사용자가 직접 고르던 슬라이더·인자를 없애고
 # 여기 한 곳에 고정한다. 근거 (2026-06-02 안전 유니버스 실제 분포로 결정):

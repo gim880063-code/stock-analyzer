@@ -540,7 +540,7 @@ def verify_item_scores(forward_days: int = 5, use_excess: bool = True) -> dict:
     forward_days: 5(단기) / 20(중기) / 60(장기). 데이터 기간이 짧으면 20·60일은
     완성된 관측이 거의 없다(반환의 n_dates 로 표본 기간 확인).
     """
-    all_hist = history.load_all()
+    all_hist = history.load_all(include_archive=True)  # 아카이브 포함 — 장기 검증 창
     today = _today_key()
 
     per_item: dict[str, dict[int, list[float]]] = defaultdict(lambda: defaultdict(list))
@@ -757,7 +757,7 @@ def verify_composite_walk_forward(
 
     반환: _aggregate_walk_forward 결과 + forward_days/use_excess/score_type.
     """
-    all_hist = history.load_all()
+    all_hist = history.load_all(include_archive=True)  # 아카이브 포함 — 장기 검증 창
     today = _today_key()
     market_cache: dict[str, "pd.Series | None"] = {}
 

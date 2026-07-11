@@ -185,6 +185,25 @@ def run(universe: str, min_score: int, deep: bool, workers: int) -> dict:
         candidates.sort(key=lambda r: r.get("total", -999), reverse=True)
         _log(f"stage2 결과: deep 후 min_score 통과 {len(candidates)}개 (탈락 {len(deep_dropped)})")
 
+    # 업종 집중 상한 — 같은 업종만 우르르 통과해 상관 하락에 통째로 노출되는 걸 제한.
+    # 강등된 종목은 탈락 사유에 남기고 아래에서 '관찰'로 계속 추적한다.
+    sector_demoted: list[dict] = []
+    try:
+        from analyzer import apply_sector_cap
+        candidates, sector_demoted = apply_sector_cap(candidates)
+        for d in sector_demoted:
+            r = d["result"]
+            dropped_details.append({
+                "code": r.get("code"), "name": r.get("name", r.get("code")),
+                "total": r.get("total"), "close": r.get("last_close"),
+                "reason": d["reason"],
+            })
+        if sector_demoted:
+            _log(f"업종 상한: {len(sector_demoted)}개 관찰로 전환 (통과 {len(candidates)}개 유지)")
+    except Exception as e:
+        _log(f"업종 상한 적용 실패(통과 목록 그대로 유지): {type(e).__name__}: {e}")
+        sector_demoted = []
+
     # 저장
     try:
         if hasattr(screening_history, "record_today_details"):
@@ -204,6 +223,14 @@ def run(universe: str, min_score: int, deep: bool, workers: int) -> dict:
     except Exception as e:
         _log(f"scouted 저장 실패: {type(e).__name__}: {e}")
         added, skipped = 0, 0
+
+    # 업종 상한으로 강등된 종목은 관찰(observed)로 추적 지속 — 검증 데이터 유지
+    if sector_demoted:
+        try:
+            _dem_results = [d["result"] for d in sector_demoted]
+            scouted.add_observed_from_analysis(_dem_results, universe=universe)
+        except Exception as e:
+            _log(f"업종 상한 강등분 관찰 기록 실패: {type(e).__name__}: {e}")
 
     passed_codes = {r.get("code") for r in candidates}
 

@@ -33,6 +33,10 @@ import cloud_store
 
 
 FILENAME = "score_history.json"
+ARCHIVE_FILENAME = "score_history_archive.json"
+# 본 파일에 유지하는 기간. 넘긴 기록은 삭제하지 않고 아카이브 파일로 옮긴다
+# (데이터 무손실 — 장기 walk-forward 검증에 계속 활용). 본 파일을 작게 유지하는
+# 이유: score_history 가 Gist 전체 용량을 키워 다른 파일이 잘리던 전례.
 RETENTION_DAYS = 365
 
 # 과거 항목 이름 → 현재 이름. 점수 항목 이름이 바뀌면(예: "재무"→"재무 건전성")
@@ -77,8 +81,41 @@ def _load() -> dict[str, list[dict]]:
     return data
 
 
+def _archive_aged(history: dict[str, list[dict]]) -> dict[str, list[dict]]:
+    """RETENTION_DAYS 를 넘긴 기록을 아카이브 파일로 옮기고(삭제 아님) 본체를 돌려준다.
+
+    아카이브는 날짜 중복 없이 병합 — 같은 기록을 두 번 옮겨도 안전.
+    옮길 게 없으면(대부분의 저장) 아카이브 파일을 건드리지 않는다.
+    """
+    cutoff = (datetime.now() - timedelta(days=RETENTION_DAYS)).strftime("%Y-%m-%d")
+    aged: dict[str, list[dict]] = {}
+    kept: dict[str, list[dict]] = {}
+    for code, entries in history.items():
+        if not isinstance(entries, list):
+            continue
+        old = [e for e in entries if e.get("date", "") < cutoff]
+        if old:
+            aged[code] = old
+        kept[code] = [e for e in entries if e.get("date", "") >= cutoff]
+    if aged:
+        try:
+            archive = cloud_store.load(ARCHIVE_FILENAME, {})
+            if not isinstance(archive, dict):
+                archive = {}
+            for code, old in aged.items():
+                have = {e.get("date") for e in archive.get(code, []) if isinstance(e, dict)}
+                merged = list(archive.get(code, [])) + [e for e in old if e.get("date") not in have]
+                merged.sort(key=lambda e: e.get("date", ""))
+                archive[code] = merged
+            cloud_store.save(ARCHIVE_FILENAME, archive)
+        except Exception:
+            # 아카이브 실패 시 본체에서도 지우지 않음 — 데이터 유실 방지
+            return history
+    return kept
+
+
 def _save(history: dict[str, list[dict]]) -> None:
-    cloud_store.save(FILENAME, history)
+    cloud_store.save(FILENAME, _archive_aged(history))
 
 
 def begin_batch() -> None:
@@ -147,9 +184,7 @@ def record_snapshot(
 
         entries = [e for e in history.get(code, []) if e.get("date") != today]
         entries.append(entry)
-
-        cutoff = (datetime.now() - timedelta(days=RETENTION_DAYS)).strftime("%Y-%m-%d")
-        entries = [e for e in entries if e.get("date", "") >= cutoff]
+        # 오래된 기록은 삭제하지 않는다 — _save 가 아카이브 파일로 옮김(무손실)
         entries.sort(key=lambda e: e.get("date", ""))
 
         history[code] = entries
@@ -162,9 +197,29 @@ def get_history(code: str, days: int = 30) -> list[dict]:
     return [e for e in _load().get(code, []) if e.get("date", "") >= cutoff]
 
 
-def load_all() -> dict[str, list[dict]]:
-    """전체 종목의 히스토리 로드 — 검증/백테스트용."""
-    return _load()
+def load_all(include_archive: bool = False) -> dict[str, list[dict]]:
+    """전체 종목의 히스토리 로드 — 검증/백테스트용.
+
+    include_archive=True 면 아카이브(365일 초과분)까지 병합해 장기 검증 창을 넓힌다.
+    """
+    data = _load()
+    if not include_archive:
+        return data
+    archive = cloud_store.load(ARCHIVE_FILENAME, {})
+    if not isinstance(archive, dict):
+        return data
+    for code, old in archive.items():
+        if not isinstance(old, list):
+            continue
+        for e in old:
+            if isinstance(e, dict) and isinstance(e.get("scores"), dict):
+                e["scores"] = normalize_scores(e["scores"])
+        cur = data.get(code, [])
+        have = {e.get("date") for e in cur if isinstance(e, dict)}
+        merged = [e for e in old if isinstance(e, dict) and e.get("date") not in have] + cur
+        merged.sort(key=lambda e: e.get("date", ""))
+        data[code] = merged
+    return data
 
 
 def compute_trend(code: str, days: int = 30) -> dict | None:

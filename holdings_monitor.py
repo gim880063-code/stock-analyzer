@@ -20,6 +20,12 @@ import portfolio as port
 # 손절선이 저장 안 된 보유 종목의 기본 손절 (평단 대비 %)
 DEFAULT_STOP_PCT = 8.0
 
+# 시간 손절 점검 — 이 일수 이상 보유했는데 손익이 없으면(현재가 ≤ 평단) 자본 회전 알림.
+# 90일 근거: 발굴 검증의 최장 호라이즌이 60영업일(≈3개월)이라, 그 기간을 지나도
+# 성과가 없으면 발굴 논리가 틀렸을 가능성이 크고 자본만 묶인다. 손절선과 달리
+# '가격이 안 빠졌지만 안 가는' 죽은 돈을 잡는 보완 장치 (정보형 알림).
+TIME_STOP_DAYS = 90
+
 # 알림 심각도 표시
 LEVEL_ICON = {"high": "🔴", "medium": "🟡", "info": "🔵"}
 
@@ -86,6 +92,21 @@ def evaluate_holding(
         alerts.append(("medium", f"근거 약화 — 현재 신호 '{action}' (재평가 점검)"))
     elif isinstance(total, (int, float)) and total <= -1:
         alerts.append(("medium", f"근거 약화 — 종합점수 {total} (재평가 점검)"))
+
+    # 5) 시간 손절 — 오래 들고 있는데 수익이 없는 '죽은 돈' 점검 (자본 회전)
+    added_at = holding.get("added_at")
+    if added_at and current and avg and current <= avg:
+        try:
+            held_days = (datetime.now() - datetime.strptime(str(added_at), "%Y-%m-%d")).days
+        except ValueError:
+            held_days = None
+        if held_days is not None and held_days >= TIME_STOP_DAYS:
+            pct = (current / avg - 1) * 100
+            alerts.append((
+                "medium",
+                f"시간 손절 점검 — 보유 {held_days}일째 수익 없음({pct:+.1f}%). "
+                f"자본을 더 좋은 후보로 회전할지 검토",
+            ))
 
     pnl = port.compute_pnl(holding, current) if current else {}
     return {

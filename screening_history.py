@@ -35,6 +35,10 @@ from typing import Any
 import cloud_store
 
 FILENAME = "screening_history.json"
+ARCHIVE_FILENAME = "screening_history_archive.json"
+# 본 파일에 유지하는 기간(화면의 '90일 누적'과 동일). 넘긴 날짜는 삭제하지 않고
+# 아카이브 파일로 옮긴다 — 발굴 이력은 점수 검증(walk-forward)의 원천 데이터라
+# 무손실 보존. 본 파일을 작게 유지해 Gist 용량 잘림도 예방.
 RETENTION_DAYS = 90
 
 # 한국 시장 앱이라 날짜·시각은 KST 기준으로 본다. 배포 환경(Streamlit Cloud)과
@@ -118,7 +122,20 @@ def _save(history: dict[str, dict]) -> None:
 
 
 def _prune(history: dict[str, dict]) -> dict[str, dict]:
+    """RETENTION_DAYS 를 넘긴 날짜를 아카이브 파일로 옮기고(삭제 아님) 본체를 돌려준다."""
     cutoff = (datetime.now() - timedelta(days=RETENTION_DAYS)).strftime("%Y-%m-%d")
+    aged = {d: v for d, v in history.items() if d < cutoff}
+    if aged:
+        try:
+            archive = cloud_store.load(ARCHIVE_FILENAME, {})
+            if not isinstance(archive, dict):
+                archive = {}
+            # 이미 아카이브된 날짜는 덮어쓰지 않음 — 최초 기록 보존
+            for d, v in aged.items():
+                archive.setdefault(d, v)
+            cloud_store.save(ARCHIVE_FILENAME, archive)
+        except Exception:
+            return history  # 아카이브 실패 시 본체에서도 지우지 않음 (유실 방지)
     return {d: v for d, v in history.items() if d >= cutoff}
 
 

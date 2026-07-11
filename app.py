@@ -2052,6 +2052,31 @@ def _screen_worker(runner: dict, stock_dict_local: dict[str, str]) -> None:
         results.sort(key=lambda r: r.get("total", -999), reverse=True)
         runner["dropped_after_deep"] = len(deep_dropped)
 
+    # 업종 집중 상한 — 같은 업종만 우르르 통과하는 상관 리스크 제한.
+    # (배포 직후 stale 모듈캐시로 analyzer 에 함수가 없을 수 있어 가드 — 그 경우 건너뜀)
+    runner["sector_capped"] = 0
+    _sector_demoted_results: list[dict] = []
+    try:
+        from analyzer import apply_sector_cap as _apply_sector_cap
+    except ImportError:
+        _apply_sector_cap = None
+    if _apply_sector_cap is not None:
+        try:
+            results, _sector_demoted = _apply_sector_cap(results)
+            for d in _sector_demoted:
+                rr = d["result"]
+                dropped_details.append({
+                    "code": rr.get("code"),
+                    "name": rr.get("name", rr.get("code")),
+                    "total": rr.get("total"),
+                    "close": rr.get("last_close"),
+                    "reason": d["reason"],
+                })
+            runner["sector_capped"] = len(_sector_demoted)
+            _sector_demoted_results = [d["result"] for d in _sector_demoted]
+        except Exception:
+            _sector_demoted_results = []
+
     for r in results:
         r["_screen_reason"] = _build_pass_reason(r, min_score)
 
@@ -2085,6 +2110,13 @@ def _screen_worker(runner: dict, stock_dict_local: dict[str, str]) -> None:
         runner["scouted_skipped"] = skipped
     except Exception as e:
         runner["scouted_error"] = f"{type(e).__name__}: {e}"
+
+    # 업종 상한으로 강등된 종목은 관찰(observed)로 추적 지속 — 검증 데이터 유지
+    if _sector_demoted_results:
+        try:
+            scouted.add_observed_from_analysis(_sector_demoted_results, universe=universe)
+        except Exception:
+            pass
 
     # 과열장 적응 통과(adaptive) + 관찰(observed) — 통과 0개여도 시뮬 데이터가 끊기지 않게.
     runner["adaptive_added"] = None

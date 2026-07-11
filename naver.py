@@ -15,6 +15,60 @@ import requests
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 URL_TMPL = "https://finance.naver.com/item/frgn.naver?code={code}&page={page}"
 NEWS_URL_TMPL = "https://finance.naver.com/item/news_news.naver?code={code}&page={page}&clusterId="
+INTEGRATION_URL_TMPL = "https://m.stock.naver.com/api/stock/{code}/integration"
+
+# ─────────── 업종(섹터) 조회 ───────────
+# 스크리닝 '업종 집중 상한'용. KRX 상장 목록엔 KOSPI 대형주 섹터가 비어 있어
+# (fdr KRX-DESC 의 Sector 가 NaN), 네이버 통합 API 의 industryCode 를 쓴다.
+# 예: 삼성전자·SK하이닉스 = 278(반도체), NAVER·카카오 = 300.
+# 업종은 거의 안 바뀌므로 길게 캐시(Gist+로컬) — 스크리닝당 신규 종목만 조회.
+SECTOR_CACHE_FILE = "sector_cache.json"
+SECTOR_CACHE_DAYS = 45
+
+
+def get_industry_codes(codes: list[str]) -> dict[str, str | None]:
+    """여러 종목의 네이버 업종 코드를 한 번에. 실패한 종목은 None.
+
+    캐시 우선 조회 후, 없는 것만 API 호출하고 캐시는 한 번만 저장한다.
+    """
+    import cloud_store
+    from datetime import datetime, timedelta
+
+    cache = cloud_store.load(SECTOR_CACHE_FILE, {})
+    if not isinstance(cache, dict):
+        cache = {}
+    fresh_cutoff = (datetime.now() - timedelta(days=SECTOR_CACHE_DAYS)).strftime("%Y-%m-%d")
+
+    out: dict[str, str | None] = {}
+    fetched_new = False
+    for code in codes:
+        code = str(code)
+        e = cache.get(code)
+        if isinstance(e, dict) and e.get("ind") and e.get("at", "") >= fresh_cutoff:
+            out[code] = str(e["ind"])
+            continue
+        ind = ""
+        try:
+            r = requests.get(
+                INTEGRATION_URL_TMPL.format(code=code), headers=HEADERS, timeout=10,
+            )
+            if r.ok:
+                ind = str(r.json().get("industryCode") or "")
+        except Exception:
+            ind = ""
+        if ind:
+            cache[code] = {"ind": ind, "at": datetime.now().strftime("%Y-%m-%d")}
+            out[code] = ind
+            fetched_new = True
+        else:
+            # 조회 실패 시 만료된 캐시라도 사용 (업종은 거의 안 바뀜)
+            out[code] = str(e["ind"]) if isinstance(e, dict) and e.get("ind") else None
+    if fetched_new:
+        try:
+            cloud_store.save(SECTOR_CACHE_FILE, cache)
+        except Exception:
+            pass
+    return out
 
 
 def _parse_int(v) -> float | None:
