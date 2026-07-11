@@ -98,21 +98,19 @@ if trades:
             return quotes.price_history(market, code, first_date - timedelta(days=10))
 
         try:
-            monthly = journal.compute_monthly_returns(
-                adj_trades, _price_fn, fx_series, incomes=incomes,
-            )
+            # 배당은 재투자분이 매수 기록으로 이미 잡히므로 자산 수익률에서 제외
+            # (사용자 방침: 배당은 별도 섹션에서 참고용으로만 관리)
+            monthly = journal.compute_monthly_returns(adj_trades, _price_fn, fx_series)
         except Exception as e:
             st.warning(f"수익률 계산 실패 (가격 데이터 문제일 수 있음): {type(e).__name__}: {e}")
 
 yearly = journal.yearly_returns(monthly)
 realized_monthly, realized_yearly = journal.realized_by_period(realized)
-incomes_monthly, incomes_yearly = journal.incomes_by_period(incomes)
-# '확정손익' = 매매 실현손익 + 세후 배당 + 기타 수입 − 세금·비용
-confirmed_monthly = journal.merge_period_sums(realized_monthly, incomes_monthly)
-confirmed_yearly = journal.merge_period_sums(realized_yearly, incomes_yearly)
-total_dividends = sum(
-    journal.income_net_krw(e) for e in incomes if e["type"] == "dividend"
-)
+# 배당·세금은 자산 집계(평가액·실현손익·수익률)와 분리 — 배당 섹션 전용 집계
+div_incomes = [e for e in incomes if e["type"] == "dividend"]
+etc_incomes = [e for e in incomes if e["type"] != "dividend"]
+div_monthly, div_yearly = journal.incomes_by_period(div_incomes)
+total_dividends = sum(journal.income_net_krw(e) for e in div_incomes)
 
 # 보유 현황 평가 (현재가 기준)
 rows = []
@@ -149,7 +147,6 @@ for r in rows:
 # ─────────── 요약 ───────────
 total_pnl = total_value_krw - total_cost_krw
 total_realized = sum(r["pnl_krw"] for r in realized)
-total_confirmed = total_realized + sum(journal.income_net_krw(e) for e in incomes)
 this_year = journal.today_kst().strftime("%Y")
 year_now = next((y for y in yearly if y["year"] == this_year), None)
 
@@ -161,8 +158,8 @@ c2.metric(
     f"{(total_value_krw / total_cost_krw - 1) * 100:+.2f}%" if total_cost_krw > 0 else None,
 )
 c3.metric(
-    "누적 확정손익 (매매+배당)", f"{total_confirmed:+,.0f}원",
-    f"{confirmed_yearly.get(this_year, 0.0):+,.0f}원 (올해)" if (realized or incomes) else None,
+    "누적 실현손익", f"{total_realized:+,.0f}원",
+    f"{realized_yearly.get(this_year, 0.0):+,.0f}원 (올해)" if realized else None,
 )
 c4.metric(
     f"{this_year}년 수익률",
@@ -273,8 +270,9 @@ with st.expander("➕ 매매 입력 (매수/매도)", expanded=not trades):
 with st.expander(f"💵 배당금·세금·기타 입력 ({len(incomes)}건)"):
     st.caption(
         "배당금은 세전 금액을 넣으면 원천징수세(한국 15.4% / 미국 15%)를 자동 계산해 "
-        "세후 원화로 집계됩니다. 해외주식 양도소득세, 출금·이체 수수료 같은 비용도 "
-        "'세금·비용'으로 기록하면 확정손익에서 차감됩니다."
+        "세후 원화로 기록됩니다. 해외주식 양도소득세, 출금·이체 수수료 같은 것도 "
+        "'세금·비용'으로 남길 수 있습니다. **여기 기록은 아래 배당금 섹션에 따로 모이며, "
+        "평가액·실현손익·수익률에는 반영되지 않습니다** (배당 재투자분은 매수 기록으로 잡히니까요)."
     )
     igen = st.session_state.setdefault("income_form_gen", 0)
     inc_type_kor = st.radio(
@@ -470,155 +468,82 @@ if rows:
 else:
     st.caption("보유 중인 종목이 없습니다. 위에서 매매를 입력하세요.")
 
-# ─────────── 실현손익 (매매·배당 확정 손익) ───────────
-st.subheader("💰 실현손익 — 매매·배당으로 확정한 손익")
-if realized or incomes:
+# ─────────── 실현손익 (매매 확정 손익 — 배당 제외) ───────────
+st.subheader("💰 실현손익 — 매수·매도로 확정한 손익")
+if realized:
     _ym_now = journal.today_kst().strftime("%Y-%m")
-    r1, r2, r3, r4 = st.columns(4)
-    r1.metric("이번 달 확정손익", f"{confirmed_monthly.get(_ym_now, 0.0):+,.0f}원")
-    r2.metric(f"{this_year}년 확정손익", f"{confirmed_yearly.get(this_year, 0.0):+,.0f}원")
-    r3.metric("누적 확정손익", f"{total_confirmed:+,.0f}원")
-    r4.metric("누적 배당 (세후)", f"{total_dividends:+,.0f}원")
-    st.caption("확정손익 = 매매 실현손익 + 세후 배당 + 기타 수입 − 세금·비용 (원화)")
+    r1, r2, r3 = st.columns(3)
+    r1.metric("이번 달 실현손익", f"{realized_monthly.get(_ym_now, 0.0):+,.0f}원")
+    r2.metric(f"{this_year}년 실현손익", f"{realized_yearly.get(this_year, 0.0):+,.0f}원")
+    r3.metric("누적 실현손익", f"{total_realized:+,.0f}원")
 
-    tab_rt, tab_rg, tab_rs, tab_rd, tab_ri = st.tabs(
-        ["월간·연간 표", "누적·월별 그래프", "종목별", "매도 내역", "배당·기타 내역"]
+    tab_rt, tab_rg, tab_rs, tab_rd = st.tabs(
+        ["월간·연간 표", "누적·월별 그래프", "종목별", "매도 내역"]
     )
 
     with tab_rt:
         # 연도 × 월 피벗 + 연간 열 (단위: 원)
-        r_years = sorted({k[:4] for k in confirmed_monthly})
+        r_years = sorted({k[:4] for k in realized_monthly})
         r_table = {}
         for y in r_years:
-            row = {f"{mm}월": confirmed_monthly.get(f"{y}-{mm:02d}") for mm in range(1, 13)}
-            row["연간"] = confirmed_yearly.get(y)
+            row = {f"{mm}월": realized_monthly.get(f"{y}-{mm:02d}") for mm in range(1, 13)}
+            row["연간"] = realized_yearly.get(y)
             r_table[y] = row
         df_rt = pd.DataFrame(r_table).T
         styled_rt = df_rt.style.map(_color_pnl).format("{:+,.0f}", na_rep="")
         st.dataframe(styled_rt, use_container_width=True)
         st.caption(
-            "단위: 원. 매매 실현손익(이동평균법·수수료 차감·환차손익 포함) + 세후 배당 + "
-            "기타 수입 − 세금·비용. 내역이 있는 달만 값이 표시됩니다."
+            "단위: 원. 매도가 있었던 달만 값이 표시됩니다. 이동평균법·수수료 차감, "
+            "미국 주식은 매수·매도 각각의 체결 환율로 환산(환차손익 포함). 배당은 별도 섹션에서 관리."
         )
 
     with tab_rg:
-        s_rm = journal.period_series(confirmed_monthly)
+        s_rm = journal.period_series(realized_monthly)
         if len(s_rm) > 0:
-            st.markdown("**누적 확정손익 (원)** — 매매·배당으로 확정한 손익이 쌓여온 흐름")
-            st.line_chart(s_rm.cumsum().rename("누적 확정손익(원)"), height=260)
-            st.markdown("**월별 확정손익 (원)**")
+            st.markdown("**누적 실현손익 (원)** — 매도로 확정한 손익이 쌓여온 흐름")
+            st.line_chart(s_rm.cumsum().rename("누적 실현손익(원)"), height=260)
+            st.markdown("**월별 실현손익 (원)**")
             bar = pd.Series(
                 s_rm.values, index=[d.strftime("%Y-%m") for d in s_rm.index],
-                name="확정손익(원)",
+                name="실현손익(원)",
             )
             st.bar_chart(bar, height=220)
 
     with tab_rs:
         by_sym = journal.realized_by_symbol(realized)
-        div_sym = journal.dividends_by_symbol(incomes)
-        _seen = set()
-        rs_rows = []
-        for a in by_sym:
-            key = (a["market"], a["code"])
-            _seen.add(key)
-            div = div_sym.get(key, {}).get("net_krw", 0.0)
-            rs_rows.append({
-                "시장": "🇰🇷" if a["market"] == "KR" else "🇺🇸",
-                "종목": f"{a['name']} ({a['code']})",
-                "매도 횟수": a["sells"],
-                "매매손익(원)": a["pnl_krw"],
-                "배당 세후(원)": div or None,
-                "합계(원)": a["pnl_krw"] + div,
-                "실현수익률%": a["ret"] * 100 if a["ret"] is not None else None,
-            })
-        for key, dv in div_sym.items():  # 매도 없이 배당만 받은 종목
-            if key in _seen:
-                continue
-            rs_rows.append({
-                "시장": "🇰🇷" if key[0] == "KR" else "🇺🇸",
-                "종목": f"{dv['name']} ({key[1]})",
-                "매도 횟수": 0,
-                "매매손익(원)": None,
-                "배당 세후(원)": dv["net_krw"],
-                "합계(원)": dv["net_krw"],
-                "실현수익률%": None,
-            })
-        rs_rows.sort(key=lambda r: r["합계(원)"], reverse=True)
-        if rs_rows:
-            df_rs = pd.DataFrame(rs_rows)
-            styled_rs = df_rs.style.map(
-                _color_pnl, subset=["매매손익(원)", "배당 세후(원)", "합계(원)", "실현수익률%"],
-            ).format(
-                {"매매손익(원)": "{:+,.0f}", "배당 세후(원)": "{:+,.0f}",
-                 "합계(원)": "{:+,.0f}", "실현수익률%": "{:+.2f}"}, na_rep="-",
-            )
-            st.dataframe(styled_rs, use_container_width=True, hide_index=True)
-            st.caption("어떤 종목에서 벌고 잃었는지 — 실현수익률 = 매매손익 ÷ 매도한 수량의 매입원가(원화).")
-        else:
-            st.caption("매도나 배당이 있는 종목이 아직 없습니다.")
+        df_rs = pd.DataFrame([
+            {"시장": "🇰🇷" if a["market"] == "KR" else "🇺🇸",
+             "종목": f"{a['name']} ({a['code']})",
+             "매도 횟수": a["sells"],
+             "실현손익(원)": a["pnl_krw"],
+             "실현수익률%": a["ret"] * 100 if a["ret"] is not None else None}
+            for a in by_sym
+        ])
+        styled_rs = df_rs.style.map(_color_pnl, subset=["실현손익(원)", "실현수익률%"]).format(
+            {"실현손익(원)": "{:+,.0f}", "실현수익률%": "{:+.2f}"}, na_rep="-",
+        )
+        st.dataframe(styled_rs, use_container_width=True, hide_index=True)
+        st.caption("어떤 종목에서 벌고 잃었는지 — 실현수익률 = 실현손익 ÷ 매도한 수량의 매입원가(원화).")
 
     with tab_rd:
-        if realized:
-            df_r = pd.DataFrame([
-                {"매도일": r["date"],
-                 "시장": "🇰🇷" if r["market"] == "KR" else "🇺🇸",
-                 "종목": f"{r['name']} ({r['code']})",
-                 "수량": r["qty"],
-                 "매도금액(원)": r["proceeds_krw"],
-                 "실현손익(원)": r["pnl_krw"],
-                 "실현수익률%": (r["pnl_krw"] / r["cost_krw"] * 100) if r["cost_krw"] > 0 else None}
-                for r in reversed(realized)
-            ])
-            styled_r = df_r.style.map(_color_pnl, subset=["실현손익(원)", "실현수익률%"]).format(
-                {"수량": "{:,.0f}", "매도금액(원)": "{:,.0f}",
-                 "실현손익(원)": "{:+,.0f}", "실현수익률%": "{:+.2f}"}, na_rep="-",
-            )
-            st.dataframe(styled_r, use_container_width=True, hide_index=True)
-            st.caption("매도 1건마다의 확정 손익입니다.")
-        else:
-            st.caption("아직 매도 기록이 없습니다.")
-
-    with tab_ri:
-        if incomes:
-            _type_kor = {"dividend": "💰 배당", "expense": "🧾 세금·비용", "income": "➕ 기타 수입"}
-            inc_ordered = sorted(incomes, key=lambda e: e.get("date", ""), reverse=True)
-            df_i = pd.DataFrame([
-                {"삭제": False,
-                 "날짜": e["date"],
-                 "유형": _type_kor.get(e["type"], e["type"]),
-                 "종목/설명": e["name"],
-                 "금액": e["amount"],
-                 "세금": e["tax"] if e["type"] == "dividend" else None,
-                 "통화": "원" if e["currency"] == "KRW" else "달러",
-                 "환율": e["fx"] if e["currency"] == "USD" else None,
-                 "원화 효과": journal.income_net_krw(e)}
-                for e in inc_ordered
-            ])
-            edited_i = st.data_editor(
-                df_i,
-                use_container_width=True,
-                hide_index=True,
-                disabled=[c for c in df_i.columns if c != "삭제"],
-                column_config={
-                    "삭제": st.column_config.CheckboxColumn(width="small"),
-                    "금액": st.column_config.NumberColumn(format="%,.2f"),
-                    "세금": st.column_config.NumberColumn(format="%,.2f"),
-                    "환율": st.column_config.NumberColumn(format="%,.2f"),
-                    "원화 효과": st.column_config.NumberColumn(format="%,.0f"),
-                },
-                key=f"inc_editor_{hash(tuple(e['id'] for e in inc_ordered))}",
-            )
-            checked_i = [i for i, v in enumerate(edited_i["삭제"].tolist()) if v]
-            if checked_i:
-                if st.button(f"🗑️ 선택한 {len(checked_i)}건 삭제", key="inc_del_btn"):
-                    _ids = {inc_ordered[i]["id"] for i in checked_i}
-                    journal.delete_incomes(_ids)
-                    st.rerun()
-            st.caption("'원화 효과'는 확정손익에 더해지는 값 — 배당은 세후(+), 세금·비용은 (−).")
-        else:
-            st.caption("아직 배당·세금 기록이 없습니다 — 위의 '배당금·세금·기타 입력'에서 추가하세요.")
+        df_r = pd.DataFrame([
+            {"매도일": r["date"],
+             "시장": "🇰🇷" if r["market"] == "KR" else "🇺🇸",
+             "종목": f"{r['name']} ({r['code']})",
+             "수량": r["qty"],
+             "매도금액(원)": r["proceeds_krw"],
+             "실현손익(원)": r["pnl_krw"],
+             "실현수익률%": (r["pnl_krw"] / r["cost_krw"] * 100) if r["cost_krw"] > 0 else None}
+            for r in reversed(realized)
+        ])
+        styled_r = df_r.style.map(_color_pnl, subset=["실현손익(원)", "실현수익률%"]).format(
+            {"수량": "{:,.0f}", "매도금액(원)": "{:,.0f}",
+             "실현손익(원)": "{:+,.0f}", "실현수익률%": "{:+.2f}"}, na_rep="-",
+        )
+        st.dataframe(styled_r, use_container_width=True, hide_index=True)
+        st.caption("매도 1건마다의 확정 손익입니다.")
 else:
-    st.caption("아직 매도·배당 기록이 없습니다 — 매도나 배당을 입력하면 여기에 월간·연간·종목별로 집계됩니다.")
+    st.caption("아직 매도 기록이 없습니다 — 매도를 입력하면 여기에 월간·연간·종목별로 집계됩니다.")
 
 # ─────────── 수익률 ───────────
 st.subheader("📈 수익률 (월간·연간)")
@@ -670,6 +595,141 @@ if monthly:
         st.caption("손익 = 실현손익 + 보유분 평가손익 변동 (원화).")
 else:
     st.caption("매매를 입력하면 첫 매매가 있는 달부터 수익률이 계산됩니다.")
+
+# ─────────── 배당금 (자산 집계와 분리된 참고 기록) ───────────
+st.subheader("💵 배당금 — 언제, 얼마나 받았는지 (자산 집계와 별도)")
+if div_incomes:
+    _ym_now2 = journal.today_kst().strftime("%Y-%m")
+    d1, d2, d3, d4 = st.columns(4)
+    d1.metric("이번 달 배당 (세후)", f"{div_monthly.get(_ym_now2, 0.0):,.0f}원")
+    d2.metric(f"{this_year}년 배당 (세후)", f"{div_yearly.get(this_year, 0.0):,.0f}원")
+    d3.metric("누적 배당 (세후)", f"{total_dividends:,.0f}원")
+    d4.metric("받은 횟수", f"{len(div_incomes)}회")
+    st.caption(
+        "배당은 재투자되어 매수 기록으로 자산에 잡히므로, 여기서는 참고용으로만 집계합니다 "
+        "(평가액·실현손익·수익률에 미포함)."
+    )
+
+    tab_dy, tab_dg, tab_ds, tab_dd = st.tabs(
+        ["연도별 표", "월별 그래프", "종목별", "받은 내역"]
+    )
+
+    with tab_dy:
+        d_rows = []
+        for y in sorted({e["date"][:4] for e in div_incomes}):
+            evs = [e for e in div_incomes if e["date"][:4] == y]
+            d_rows.append({
+                "연도": y,
+                "받은 횟수": len(evs),
+                "세전(원)": sum(e["amount"] * e["fx"] for e in evs),
+                "세금(원)": sum(e["tax"] * e["fx"] for e in evs),
+                "세후(원)": sum(journal.income_net_krw(e) for e in evs),
+            })
+        df_dy = pd.DataFrame(d_rows)
+        st.dataframe(
+            df_dy.style.format(
+                {"세전(원)": "{:,.0f}", "세금(원)": "{:,.0f}", "세후(원)": "{:,.0f}"},
+            ),
+            use_container_width=True, hide_index=True,
+        )
+        st.caption("환율은 각 배당의 지급일 환율로 원화 환산.")
+
+    with tab_dg:
+        s_dm = journal.period_series(div_monthly)
+        if len(s_dm) > 0:
+            st.markdown("**월별 배당 수령액 (세후, 원)**")
+            bar_d = pd.Series(
+                s_dm.values, index=[d.strftime("%Y-%m") for d in s_dm.index],
+                name="배당(원)",
+            )
+            st.bar_chart(bar_d, height=240)
+            st.markdown("**누적 배당 (세후, 원)**")
+            st.line_chart(s_dm.cumsum().rename("누적 배당(원)"), height=220)
+
+    with tab_ds:
+        div_sym = journal.dividends_by_symbol(div_incomes)
+        df_ds = pd.DataFrame([
+            {"시장": "🇰🇷" if k[0] == "KR" else "🇺🇸",
+             "종목": f"{v['name']} ({k[1]})",
+             "받은 횟수": v["count"],
+             "세후 합계(원)": v["net_krw"]}
+            for k, v in sorted(div_sym.items(), key=lambda kv: kv[1]["net_krw"], reverse=True)
+        ])
+        st.dataframe(
+            df_ds.style.format({"세후 합계(원)": "{:,.0f}"}),
+            use_container_width=True, hide_index=True,
+        )
+
+    with tab_dd:
+        div_ordered = sorted(div_incomes, key=lambda e: e.get("date", ""), reverse=True)
+        df_dd = pd.DataFrame([
+            {"삭제": False,
+             "지급일": e["date"],
+             "시장": "🇰🇷" if e["market"] == "KR" else "🇺🇸",
+             "종목": f"{e['name']} ({e['code']})",
+             "세전 금액": e["amount"],
+             "세금": e["tax"],
+             "환율": e["fx"] if e["currency"] == "USD" else None,
+             "세후(원)": journal.income_net_krw(e)}
+            for e in div_ordered
+        ])
+        edited_d = st.data_editor(
+            df_dd,
+            use_container_width=True,
+            hide_index=True,
+            disabled=[c for c in df_dd.columns if c != "삭제"],
+            column_config={
+                "삭제": st.column_config.CheckboxColumn(width="small"),
+                "세전 금액": st.column_config.NumberColumn(format="%,.2f"),
+                "세금": st.column_config.NumberColumn(format="%,.2f"),
+                "환율": st.column_config.NumberColumn(format="%,.2f"),
+                "세후(원)": st.column_config.NumberColumn(format="%,.0f"),
+            },
+            key=f"div_editor_{hash(tuple(e['id'] for e in div_ordered))}",
+        )
+        checked_d = [i for i, v in enumerate(edited_d["삭제"].tolist()) if v]
+        if checked_d:
+            if st.button(f"🗑️ 선택한 {len(checked_d)}건 삭제", key="div_del_btn"):
+                journal.delete_incomes({div_ordered[i]["id"] for i in checked_d})
+                st.rerun()
+        st.caption("세전 금액·세금은 지급 통화 기준(한국=원, 미국=달러).")
+else:
+    st.caption("아직 배당 기록이 없습니다 — 위의 '배당금·세금·기타 입력'에서 추가하면 여기에 연도별·종목별로 모입니다.")
+
+# 세금·비용/기타 수입은 참고용 기록 — 접어서 표시
+if etc_incomes:
+    with st.expander(f"🧾 세금·비용·기타 기록 ({len(etc_incomes)}건) — 참고용, 자산 집계 미반영"):
+        _type_kor = {"expense": "🧾 세금·비용", "income": "➕ 기타 수입"}
+        etc_ordered = sorted(etc_incomes, key=lambda e: e.get("date", ""), reverse=True)
+        df_e = pd.DataFrame([
+            {"삭제": False,
+             "날짜": e["date"],
+             "유형": _type_kor.get(e["type"], e["type"]),
+             "설명": e["name"],
+             "금액": e["amount"],
+             "통화": "원" if e["currency"] == "KRW" else "달러",
+             "원화 환산": abs(journal.income_net_krw(e))}
+            for e in etc_ordered
+        ])
+        edited_e = st.data_editor(
+            df_e,
+            use_container_width=True,
+            hide_index=True,
+            disabled=[c for c in df_e.columns if c != "삭제"],
+            column_config={
+                "삭제": st.column_config.CheckboxColumn(width="small"),
+                "금액": st.column_config.NumberColumn(format="%,.2f"),
+                "원화 환산": st.column_config.NumberColumn(format="%,.0f"),
+            },
+            key=f"etc_editor_{hash(tuple(e['id'] for e in etc_ordered))}",
+        )
+        checked_e = [i for i, v in enumerate(edited_e["삭제"].tolist()) if v]
+        if checked_e:
+            if st.button(f"🗑️ 선택한 {len(checked_e)}건 삭제", key="etc_del_btn"):
+                journal.delete_incomes({etc_ordered[i]["id"] for i in checked_e})
+                st.rerun()
+        _etc_total = sum(journal.income_net_krw(e) for e in etc_ordered)
+        st.caption(f"합계(수입−비용): {_etc_total:+,.0f}원 — 기록·확인용이며 어떤 계산에도 반영되지 않습니다.")
 
 # ─────────── 매매내역 ───────────
 st.subheader(f"📋 매매내역 ({len(trades)}건)")
