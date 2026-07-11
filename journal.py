@@ -290,13 +290,11 @@ def realized_by_period(realized: list[dict]) -> tuple[dict[str, float], dict[str
 
 
 # ─────────── 배당·세금·기타 현금 내역 ───────────
-# 매매 외 확정 현금흐름. 배당은 세후 원화로 실현손익 집계와 수익률(Dietz)에 반영,
-# 세금·비용/기타 수입은 확정손익 집계에만 반영(수익률에는 미반영 — 계좌 외부 지출).
+# 매매 외 기록(참고용) — 자산 집계(평가액·실현손익·수익률)와 분리해 별도 섹션에 표시.
+# 배당은 실수령액(세후 입금액) 기준으로 기록. tax 필드는 과거 데이터 호환용
+# (예전엔 세전+원천징수를 입력받았음 → net 계산 시 차감 유지).
 
 INCOMES_FILE = "incomes.json"
-
-# 배당 원천징수 기본 세율 — 한국 15.4%(배당소득세+지방세), 미국 15%(한미 조세조약)
-DIVIDEND_TAX_RATE = {"KR": 0.154, "US": 0.15}
 
 INCOME_TYPES = ("dividend", "expense", "income")
 
@@ -416,52 +414,41 @@ def dividends_by_symbol(incomes: list[dict]) -> dict[tuple, dict]:
 
 
 def taxes_by_year(incomes: list[dict]) -> dict[str, dict]:
-    """연도별 세금 집계(원). 직접 기록한 세금·비용 + 배당 원천징수를 나눠 합산.
+    """연도별 세금·비용 집계(원) — 직접 기록한 것만.
 
-    반환: {"2026": {"expense_krw", "dividend_tax_krw", "count"}}
+    반환: {"2026": {"expense_krw", "count"}}
     """
     out: dict[str, dict] = {}
     for e in incomes:
+        if e["type"] != "expense":
+            continue
         y = e["date"][:4]
-        a = out.setdefault(y, {"expense_krw": 0.0, "dividend_tax_krw": 0.0, "count": 0})
-        if e["type"] == "expense":
-            a["expense_krw"] += e["amount"] * e["fx"]
-            a["count"] += 1
-        elif e["type"] == "dividend" and e.get("tax", 0) > 0:
-            a["dividend_tax_krw"] += e["tax"] * e["fx"]
+        a = out.setdefault(y, {"expense_krw": 0.0, "count": 0})
+        a["expense_krw"] += e["amount"] * e["fx"]
+        a["count"] += 1
     return out
 
 
 def taxes_by_symbol(incomes: list[dict]) -> list[dict]:
-    """종목별 세금 합계(원) — 직접 기록(expense에 종목 연결) + 배당 원천징수.
+    """종목별 세금·비용 합계(원) — 종목 연결해 기록한 것 기준.
 
-    종목 연결 없는 세금·비용은 '계좌 공통' 한 줄로 묶인다. 합계 큰 순 정렬.
+    종목 연결 없는 기록은 '계좌 공통' 한 줄로 묶인다. 합계 큰 순 정렬.
     """
     agg: dict[tuple, dict] = {}
-
-    def _slot(market: str, code: str, name: str) -> dict:
-        key = (market, code)
-        a = agg.setdefault(key, {
-            "market": market, "code": code, "name": name or code or "계좌 공통",
-            "expense_krw": 0.0, "dividend_tax_krw": 0.0, "count": 0,
-        })
-        if name and (not a["name"] or a["name"] == a["code"]):
-            a["name"] = name
-        return a
-
     for e in incomes:
-        if e["type"] == "expense":
-            a = _slot(e.get("market", ""), e.get("code", ""), e.get("stock_name", ""))
-            a["expense_krw"] += e["amount"] * e["fx"]
-            a["count"] += 1
-        elif e["type"] == "dividend" and e.get("tax", 0) > 0:
-            a = _slot(e["market"], e["code"], e["name"])
-            a["dividend_tax_krw"] += e["tax"] * e["fx"]
-            a["count"] += 1
-    out = list(agg.values())
-    for a in out:
-        a["total_krw"] = a["expense_krw"] + a["dividend_tax_krw"]
-    return sorted(out, key=lambda x: x["total_krw"], reverse=True)
+        if e["type"] != "expense":
+            continue
+        key = (e.get("market", ""), e.get("code", ""))
+        name = e.get("stock_name", "")
+        a = agg.setdefault(key, {
+            "market": key[0], "code": key[1], "name": name or key[1] or "계좌 공통",
+            "total_krw": 0.0, "count": 0,
+        })
+        if name:
+            a["name"] = name
+        a["total_krw"] += e["amount"] * e["fx"]
+        a["count"] += 1
+    return sorted(agg.values(), key=lambda x: x["total_krw"], reverse=True)
 
 
 def merge_period_sums(*maps: dict[str, float]) -> dict[str, float]:

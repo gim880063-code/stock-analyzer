@@ -336,10 +336,10 @@ class IncomeTests(unittest.TestCase):
 
     def test_taxes_by_year_and_symbol(self):
         incomes = [
-            # TSLA 배당 $100, 세금 $15, 환율 1400 → 원천징수 21,000원
+            # 배당은 세금 집계에 포함되지 않음 (직접 기록한 세금·비용만)
             journal.normalize_income({"type": "dividend", "date": "2026-03-10",
                                       "market": "US", "code": "TSLA",
-                                      "amount": 100, "tax": 15, "fx": 1400}),
+                                      "amount": 100, "fx": 1400}),
             # TSLA 연결 양도세 300,000원
             journal.normalize_income({"type": "expense", "date": "2026-05-31",
                                       "name": "양도소득세", "amount": 300000,
@@ -354,19 +354,18 @@ class IncomeTests(unittest.TestCase):
         ]
         by_year = journal.taxes_by_year(incomes)
         self.assertAlmostEqual(by_year["2026"]["expense_krw"], 305000.0)
-        self.assertAlmostEqual(by_year["2026"]["dividend_tax_krw"], 21000.0)
+        self.assertEqual(by_year["2026"]["count"], 2)
         self.assertAlmostEqual(by_year["2025"]["expense_krw"], 100000.0)
 
         by_sym = journal.taxes_by_symbol(incomes)
         tsla = next(a for a in by_sym if a["code"] == "TSLA")
-        self.assertAlmostEqual(tsla["expense_krw"], 300000.0)
-        self.assertAlmostEqual(tsla["dividend_tax_krw"], 21000.0)
-        self.assertAlmostEqual(tsla["total_krw"], 321000.0)
+        self.assertAlmostEqual(tsla["total_krw"], 300000.0)
+        self.assertEqual(tsla["name"], "TSLA")
         common = next(a for a in by_sym if a["code"] == "")
         self.assertEqual(common["name"], "계좌 공통")
         self.assertAlmostEqual(common["total_krw"], 105000.0)
-        # 정렬: 합계 큰 순
-        self.assertEqual(by_sym[0]["code"], "TSLA")
+        # 정렬: 합계 큰 순 (배당은 목록에 없음)
+        self.assertEqual([a["code"] for a in by_sym], ["TSLA", ""])
 
     def test_income_crud(self):
         fake = FakeStore()
