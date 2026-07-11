@@ -231,6 +231,101 @@ class SplitTests(unittest.TestCase):
             self.assertEqual(journal.load_splits(), [])
 
 
+class IncomeTests(unittest.TestCase):
+    def test_dividend_net_krw_with_tax_and_fx(self):
+        e = journal.normalize_income({
+            "type": "dividend", "date": "2026-06-10", "market": "US",
+            "code": "aapl", "amount": 100, "tax": 15, "fx": 1400,
+        })
+        self.assertEqual(e["code"], "AAPL")
+        self.assertEqual(e["currency"], "USD")
+        self.assertAlmostEqual(journal.income_net_krw(e), (100 - 15) * 1400)
+
+    def test_expense_and_income_signs(self):
+        tax = journal.normalize_income({
+            "type": "expense", "date": "2026-05-31", "name": "해외주식 양도소득세",
+            "amount": 220000, "currency": "KRW",
+        })
+        self.assertAlmostEqual(journal.income_net_krw(tax), -220000.0)
+        etc = journal.normalize_income({
+            "type": "income", "date": "2026-05-31", "name": "이자",
+            "amount": 10, "currency": "USD", "fx": 1400,
+        })
+        self.assertAlmostEqual(journal.income_net_krw(etc), 14000.0)
+
+    def test_income_validation(self):
+        base = {"type": "dividend", "date": "2026-06-10", "market": "US",
+                "code": "AAPL", "amount": 100, "tax": 15, "fx": 1400}
+        for bad in ({"type": "loan"}, {"amount": 0}, {"tax": 100},
+                    {"code": ""}, {"fx": 0}, {"date": "6/10"}):
+            with self.assertRaises(ValueError):
+                journal.normalize_income({**base, **bad})
+        with self.assertRaises(ValueError):
+            journal.normalize_income({"type": "expense", "date": "2026-06-10",
+                                      "amount": 100, "currency": "EUR"})
+
+    def test_incomes_by_period_and_merge(self):
+        incomes = [
+            journal.normalize_income({"type": "dividend", "date": "2026-06-10",
+                                      "market": "KR", "code": "005930",
+                                      "amount": 100000, "tax": 15400}),
+            journal.normalize_income({"type": "expense", "date": "2026-06-20",
+                                      "name": "출금 수수료", "amount": 5000, "currency": "KRW"}),
+        ]
+        monthly, yearly = journal.incomes_by_period(incomes)
+        self.assertAlmostEqual(monthly["2026-06"], 84600 - 5000)
+        self.assertAlmostEqual(yearly["2026"], 79600)
+        merged = journal.merge_period_sums({"2026-06": 100.0}, monthly)
+        self.assertAlmostEqual(merged["2026-06"], 79700.0)
+
+    def test_dividends_by_symbol(self):
+        incomes = [
+            journal.normalize_income({"type": "dividend", "date": "2026-03-10",
+                                      "market": "US", "code": "AAPL",
+                                      "amount": 100, "tax": 15, "fx": 1400}),
+            journal.normalize_income({"type": "dividend", "date": "2026-06-10",
+                                      "market": "US", "code": "AAPL",
+                                      "amount": 100, "tax": 15, "fx": 1500}),
+            journal.normalize_income({"type": "expense", "date": "2026-06-20",
+                                      "name": "세금", "amount": 1, "currency": "KRW"}),
+        ]
+        by_sym = journal.dividends_by_symbol(incomes)
+        a = by_sym[("US", "AAPL")]
+        self.assertEqual(a["count"], 2)
+        self.assertAlmostEqual(a["net_krw"], 85 * 1400 + 85 * 1500)
+
+    def test_dividend_raises_monthly_return(self):
+        # 1/2 매수 10주@10,000, 가격 변동 없음, 1/15 배당 5,000원(세후) → 수익률 > 0
+        trades = [_t("2026-01-02", "KR", "005930", "buy", 10, 10000)]
+        px = pd.Series([10000.0, 10000.0], index=pd.to_datetime(["2026-01-02", "2026-01-31"]))
+        div = journal.normalize_income({"type": "dividend", "date": "2026-01-15",
+                                        "market": "KR", "code": "005930",
+                                        "amount": 5000, "tax": 0})
+        monthly = journal.compute_monthly_returns(
+            trades, lambda m, c: px, None, today=date(2026, 1, 31), incomes=[div])
+        jan = monthly[0]
+        self.assertAlmostEqual(jan["pnl_krw"], 5000.0)  # 배당만큼 이익
+        # denom = 100000×(30/31) − 5000×(17/31)
+        expected = 5000.0 / (100000 * 30 / 31 - 5000 * 17 / 31)
+        self.assertAlmostEqual(jan["ret"], expected, places=6)
+        # 세금·비용은 수익률에 영향 없음
+        exp = journal.normalize_income({"type": "expense", "date": "2026-01-20",
+                                        "name": "수수료", "amount": 99999, "currency": "KRW"})
+        monthly2 = journal.compute_monthly_returns(
+            trades, lambda m, c: px, None, today=date(2026, 1, 31), incomes=[div, exp])
+        self.assertAlmostEqual(monthly2[0]["ret"], expected, places=6)
+
+    def test_income_crud(self):
+        fake = FakeStore()
+        with patch.object(journal, "cloud_store", fake):
+            e = journal.add_income({"type": "dividend", "date": "2026-06-10",
+                                    "market": "KR", "code": "005930", "name": "삼성전자",
+                                    "amount": 10000, "tax": 1540})
+            self.assertEqual(len(journal.load_incomes()), 1)
+            self.assertEqual(journal.delete_incomes({e["id"]}), 1)
+            self.assertEqual(journal.load_incomes(), [])
+
+
 def _kr_series():
     return pd.Series(
         [10000.0, 11000.0, 12100.0],

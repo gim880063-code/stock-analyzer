@@ -289,6 +289,132 @@ def realized_by_period(realized: list[dict]) -> tuple[dict[str, float], dict[str
     return monthly, yearly
 
 
+# ─────────── 배당·세금·기타 현금 내역 ───────────
+# 매매 외 확정 현금흐름. 배당은 세후 원화로 실현손익 집계와 수익률(Dietz)에 반영,
+# 세금·비용/기타 수입은 확정손익 집계에만 반영(수익률에는 미반영 — 계좌 외부 지출).
+
+INCOMES_FILE = "incomes.json"
+
+# 배당 원천징수 기본 세율 — 한국 15.4%(배당소득세+지방세), 미국 15%(한미 조세조약)
+DIVIDEND_TAX_RATE = {"KR": 0.154, "US": 0.15}
+
+INCOME_TYPES = ("dividend", "expense", "income")
+
+
+def load_incomes() -> list[dict]:
+    data = cloud_store.load(INCOMES_FILE, [])
+    return data if isinstance(data, list) else []
+
+
+def normalize_income(raw: dict) -> dict:
+    """배당/세금·비용/기타수입 검증·형 보정."""
+    typ = str(raw.get("type", "")).strip()
+    if typ not in INCOME_TYPES:
+        raise ValueError("type은 dividend/expense/income 중 하나")
+    try:
+        d = str(raw.get("date", ""))
+        datetime.strptime(d, "%Y-%m-%d")
+    except ValueError:
+        raise ValueError("date는 YYYY-MM-DD 형식")
+    amount = float(raw.get("amount", 0))
+    if amount <= 0:
+        raise ValueError("금액은 0보다 커야 함")
+    tax = max(0.0, float(raw.get("tax", 0) or 0))
+    if typ == "dividend" and tax >= amount:
+        raise ValueError("세금이 배당금보다 크거나 같음")
+    market, code = "", ""
+    if typ == "dividend":
+        market = str(raw.get("market", "")).upper()
+        if market not in ("KR", "US"):
+            raise ValueError("배당은 market이 KR 또는 US")
+        code = str(raw.get("code", "")).strip().upper() if market == "US" else str(raw.get("code", "")).strip()
+        if not code:
+            raise ValueError("배당은 종목코드 필요")
+        currency = "KRW" if market == "KR" else "USD"
+    else:
+        currency = str(raw.get("currency", "KRW")).upper()
+        if currency not in ("KRW", "USD"):
+            raise ValueError("currency는 KRW 또는 USD")
+    fx = 1.0 if currency == "KRW" else float(raw.get("fx", 0))
+    if fx <= 0:
+        raise ValueError("환율은 0보다 커야 함")
+    name = str(raw.get("name", "") or code or ("기타 수입" if typ == "income" else "세금·비용")).strip()
+    return {
+        "id": str(raw.get("id") or _new_id()),
+        "date": d,
+        "type": typ,
+        "market": market,
+        "code": code,
+        "name": name,
+        "amount": amount,
+        "tax": tax,
+        "currency": currency,
+        "fx": fx,
+    }
+
+
+def add_income(raw: dict) -> dict:
+    e = normalize_income(raw)
+    cloud_store.refresh()
+    incomes = load_incomes()
+    incomes.append(e)
+    cloud_store.save(INCOMES_FILE, incomes)
+    return e
+
+
+def delete_incomes(ids: set[str]) -> int:
+    cloud_store.refresh()
+    incomes = load_incomes()
+    kept = [e for e in incomes if e.get("id") not in ids]
+    removed = len(incomes) - len(kept)
+    if removed:
+        cloud_store.save(INCOMES_FILE, kept)
+    return removed
+
+
+def income_net_krw(e: dict) -> float:
+    """이벤트 1건의 원화 순효과. 배당=세후 수령액(+), 세금·비용=(−), 기타수입=(+)."""
+    if e["type"] == "dividend":
+        return (e["amount"] - e.get("tax", 0.0)) * e["fx"]
+    if e["type"] == "expense":
+        return -e["amount"] * e["fx"]
+    return e["amount"] * e["fx"]
+
+
+def incomes_by_period(incomes: list[dict]) -> tuple[dict[str, float], dict[str, float]]:
+    """배당·세금·기타의 원화 순효과를 월별·연도별 합산."""
+    monthly: dict[str, float] = {}
+    yearly: dict[str, float] = {}
+    for e in incomes:
+        net = income_net_krw(e)
+        monthly[e["date"][:7]] = monthly.get(e["date"][:7], 0.0) + net
+        yearly[e["date"][:4]] = yearly.get(e["date"][:4], 0.0) + net
+    return monthly, yearly
+
+
+def dividends_by_symbol(incomes: list[dict]) -> dict[tuple, dict]:
+    """세후 배당 수령액(원화)을 종목별로 합산. {(market, code): {name, net_krw, count}}"""
+    out: dict[tuple, dict] = {}
+    for e in incomes:
+        if e["type"] != "dividend":
+            continue
+        key = (e["market"], e["code"])
+        a = out.setdefault(key, {"name": e["name"], "net_krw": 0.0, "count": 0})
+        a["net_krw"] += income_net_krw(e)
+        a["count"] += 1
+        a["name"] = e["name"]
+    return out
+
+
+def merge_period_sums(*maps: dict[str, float]) -> dict[str, float]:
+    """월별/연도별 합산 dict 여러 개를 키별로 더한다."""
+    out: dict[str, float] = {}
+    for m in maps:
+        for k, v in m.items():
+            out[k] = out.get(k, 0.0) + v
+    return out
+
+
 def realized_by_symbol(realized: list[dict]) -> list[dict]:
     """실현손익(원화)을 종목별로 합산. 손익 큰 순 정렬.
 
@@ -313,23 +439,27 @@ def realized_by_symbol(realized: list[dict]) -> list[dict]:
     return sorted(out, key=lambda x: x["pnl_krw"], reverse=True)
 
 
-def realized_monthly_series(realized: list[dict], today: date | None = None) -> pd.Series:
-    """첫 실현 달부터 이번 달까지, 빈 달을 0으로 채운 월별 실현손익(원) 시계열.
+def period_series(monthly_map: dict[str, float], today: date | None = None) -> pd.Series:
+    """'YYYY-MM'→금액 dict를 첫 달부터 이번 달까지 빈 달 0으로 채운 시계열로.
 
     인덱스는 월말 Timestamp — 그래프(막대·누적선)용.
     """
-    monthly, _ = realized_by_period(realized)
-    if not monthly:
+    if not monthly_map:
         return pd.Series(dtype=float, name="실현손익(원)")
     today = today or today_kst()
-    first = min(monthly)
+    first = min(monthly_map)
     y, m = int(first[:4]), int(first[5:7])
     idx, vals = [], []
     while (y, m) <= (today.year, today.month):
         idx.append(pd.Timestamp(_month_end(y, m)))
-        vals.append(monthly.get(f"{y:04d}-{m:02d}", 0.0))
+        vals.append(monthly_map.get(f"{y:04d}-{m:02d}", 0.0))
         y, m = (y + 1, 1) if m == 12 else (y, m + 1)
     return pd.Series(vals, index=idx, name="실현손익(원)")
+
+
+def realized_monthly_series(realized: list[dict], today: date | None = None) -> pd.Series:
+    """첫 실현 달부터 이번 달까지, 빈 달을 0으로 채운 월별 실현손익(원) 시계열."""
+    return period_series(realized_by_period(realized)[0], today)
 
 
 # ─────────── 평가액·수익률 (Modified Dietz) ───────────
@@ -400,18 +530,22 @@ def compute_monthly_returns(
     price_series_fn,
     fx_series: pd.Series | None,
     today: date | None = None,
+    incomes: list[dict] | None = None,
 ) -> list[dict]:
     """첫 매매가 있는 달부터 이번 달까지 월별 수익률·손익.
 
     반환: [{"ym", "start_equity", "end_equity", "net_flow", "pnl_krw", "ret"}]
       - pnl_krw: 월간 손익(원) = 기말평가 − 기초평가 − 순투입
       - ret: Modified Dietz 수익률 (자본이 사실상 없던 달은 None)
+    incomes 중 배당(dividend)은 주식에서 나온 현금 회수로 반영되어 수익률을
+    올린다. 세금·비용/기타 수입은 계좌 외부 지출·수입이라 수익률에 미반영.
     """
     ts = sorted_trades(trades)
     if not ts:
         return []
     today = today or today_kst()
     first = datetime.strptime(ts[0]["date"], "%Y-%m-%d").date()
+    dividends = [e for e in (incomes or []) if e.get("type") == "dividend"]
 
     out: list[dict] = []
     y, m = first.year, first.month
@@ -423,9 +557,17 @@ def compute_monthly_returns(
         eval_end = today if is_current else m_end
         period_days = max(1, (eval_end - m_start).days + 1)
 
-        # 월중 자금 흐름: 매수 = +투입, 매도 = −회수 (원화, 체결 환율 기준)
+        # 월중 자금 흐름: 매수 = +투입, 매도·배당 = −회수 (원화, 체결 환율 기준)
         net_flow = 0.0
         weighted_flow = 0.0
+
+        def _add_flow(flow_date: str, f: float):
+            nonlocal net_flow, weighted_flow
+            d_ = datetime.strptime(flow_date, "%Y-%m-%d").date()
+            w = (period_days - (d_ - m_start).days) / period_days
+            net_flow += f
+            weighted_flow += w * f
+
         for t in ts:
             if not (m_start.isoformat() <= t["date"] <= eval_end.isoformat()):
                 continue
@@ -433,11 +575,10 @@ def compute_monthly_returns(
                 f = (t["qty"] * t["price"] + t["fee"]) * t["fx"]
             else:
                 f = -(t["qty"] * t["price"] - t["fee"]) * t["fx"]
-            t_day = datetime.strptime(t["date"], "%Y-%m-%d").date()
-            elapsed = (t_day - m_start).days
-            w = (period_days - elapsed) / period_days
-            net_flow += f
-            weighted_flow += w * f
+            _add_flow(t["date"], f)
+        for e in dividends:
+            if m_start.isoformat() <= e["date"] <= eval_end.isoformat():
+                _add_flow(e["date"], -income_net_krw(e))
 
         end_equity = equity_at(ts, eval_end, price_series_fn, fx_series)
         pnl = end_equity - prev_equity - net_flow
