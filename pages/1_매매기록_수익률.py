@@ -149,7 +149,10 @@ c2.metric(
     f"{total_pnl:+,.0f}원",
     f"{(total_value_krw / total_cost_krw - 1) * 100:+.2f}%" if total_cost_krw > 0 else None,
 )
-c3.metric("누적 실현손익", f"{total_realized:+,.0f}원")
+c3.metric(
+    "누적 실현손익", f"{total_realized:+,.0f}원",
+    f"{realized_yearly.get(this_year, 0.0):+,.0f}원 (올해)" if realized else None,
+)
 c4.metric(
     f"{this_year}년 수익률",
     f"{year_now['ret'] * 100:+.2f}%" if year_now and year_now["ret"] is not None else "-",
@@ -344,6 +347,83 @@ if rows:
 else:
     st.caption("보유 중인 종목이 없습니다. 위에서 매매를 입력하세요.")
 
+# ─────────── 실현손익 (매도 확정 손익) ───────────
+st.subheader("💰 실현손익 — 매수·매도로 확정한 손익")
+if realized:
+    _ym_now = journal.today_kst().strftime("%Y-%m")
+    r1, r2, r3 = st.columns(3)
+    r1.metric("이번 달 실현손익", f"{realized_monthly.get(_ym_now, 0.0):+,.0f}원")
+    r2.metric(f"{this_year}년 실현손익", f"{realized_yearly.get(this_year, 0.0):+,.0f}원")
+    r3.metric("누적 실현손익", f"{total_realized:+,.0f}원")
+
+    tab_rt, tab_rg, tab_rs, tab_rd = st.tabs(
+        ["월간·연간 표", "누적·월별 그래프", "종목별", "매도 내역"]
+    )
+
+    with tab_rt:
+        # 연도 × 월 피벗 + 연간 열 (단위: 원)
+        r_years = sorted({k[:4] for k in realized_monthly})
+        r_table = {}
+        for y in r_years:
+            row = {f"{mm}월": realized_monthly.get(f"{y}-{mm:02d}") for mm in range(1, 13)}
+            row["연간"] = realized_yearly.get(y)
+            r_table[y] = row
+        df_rt = pd.DataFrame(r_table).T
+        styled_rt = df_rt.style.map(_color_pnl).format("{:+,.0f}", na_rep="")
+        st.dataframe(styled_rt, use_container_width=True)
+        st.caption(
+            "단위: 원. 매도가 있었던 달만 값이 표시됩니다. "
+            "이동평균법 기준이며 미국 주식은 매수·매도 각각의 체결 환율로 환산(환차손익 포함), 수수료 차감."
+        )
+
+    with tab_rg:
+        s_rm = journal.realized_monthly_series(realized)
+        if len(s_rm) > 0:
+            st.markdown("**누적 실현손익 (원)** — 매도로 확정한 손익이 쌓여온 흐름")
+            st.line_chart(s_rm.cumsum().rename("누적 실현손익(원)"), height=260)
+            st.markdown("**월별 실현손익 (원)**")
+            bar = pd.Series(
+                s_rm.values, index=[d.strftime("%Y-%m") for d in s_rm.index],
+                name="실현손익(원)",
+            )
+            st.bar_chart(bar, height=220)
+
+    with tab_rs:
+        by_sym = journal.realized_by_symbol(realized)
+        df_rs = pd.DataFrame([
+            {"시장": "🇰🇷" if a["market"] == "KR" else "🇺🇸",
+             "종목": f"{a['name']} ({a['code']})",
+             "매도 횟수": a["sells"],
+             "실현손익(원)": a["pnl_krw"],
+             "실현수익률%": a["ret"] * 100 if a["ret"] is not None else None}
+            for a in by_sym
+        ])
+        styled_rs = df_rs.style.map(_color_pnl, subset=["실현손익(원)", "실현수익률%"]).format(
+            {"실현손익(원)": "{:+,.0f}", "실현수익률%": "{:+.2f}"}, na_rep="-",
+        )
+        st.dataframe(styled_rs, use_container_width=True, hide_index=True)
+        st.caption("어떤 종목에서 벌고 잃었는지 — 실현수익률 = 실현손익 ÷ 매도한 수량의 매입원가(원화).")
+
+    with tab_rd:
+        df_r = pd.DataFrame([
+            {"매도일": r["date"],
+             "시장": "🇰🇷" if r["market"] == "KR" else "🇺🇸",
+             "종목": f"{r['name']} ({r['code']})",
+             "수량": r["qty"],
+             "매도금액(원)": r["proceeds_krw"],
+             "실현손익(원)": r["pnl_krw"],
+             "실현수익률%": (r["pnl_krw"] / r["cost_krw"] * 100) if r["cost_krw"] > 0 else None}
+            for r in reversed(realized)
+        ])
+        styled_r = df_r.style.map(_color_pnl, subset=["실현손익(원)", "실현수익률%"]).format(
+            {"수량": "{:,.0f}", "매도금액(원)": "{:,.0f}",
+             "실현손익(원)": "{:+,.0f}", "실현수익률%": "{:+.2f}"}, na_rep="-",
+        )
+        st.dataframe(styled_r, use_container_width=True, hide_index=True)
+        st.caption("매도 1건마다의 확정 손익입니다.")
+else:
+    st.caption("아직 매도 기록이 없습니다 — 매도를 입력하면 여기에 월간·연간·종목별로 집계됩니다.")
+
 # ─────────── 수익률 ───────────
 st.subheader("📈 수익률 (월간·연간)")
 if monthly:
@@ -394,28 +474,6 @@ if monthly:
         st.caption("손익 = 실현손익 + 보유분 평가손익 변동 (원화).")
 else:
     st.caption("매매를 입력하면 첫 매매가 있는 달부터 수익률이 계산됩니다.")
-
-# ─────────── 실현손익 ───────────
-with st.expander(f"💰 실현손익 상세 — 매도로 확정된 손익 (누적 {total_realized:+,.0f}원)"):
-    if realized:
-        if realized_monthly:
-            s_rm = pd.Series(realized_monthly, name="실현손익(원)").sort_index()
-            st.bar_chart(s_rm, height=220)
-        df_r = pd.DataFrame([
-            {"매도일": r["date"],
-             "시장": "🇰🇷" if r["market"] == "KR" else "🇺🇸",
-             "종목": f"{r['name']} ({r['code']})",
-             "수량": r["qty"],
-             "실현손익(원)": r["pnl_krw"]}
-            for r in reversed(realized)
-        ])
-        styled_r = df_r.style.map(_color_pnl, subset=["실현손익(원)"]).format(
-            {"수량": "{:,.0f}", "실현손익(원)": "{:+,.0f}"},
-        )
-        st.dataframe(styled_r, use_container_width=True, hide_index=True)
-        st.caption("이동평균법 기준. 미국 주식은 매수·매도 각각의 체결 환율로 환산해 환차손익 포함.")
-    else:
-        st.caption("아직 매도 기록이 없습니다.")
 
 # ─────────── 매매내역 ───────────
 st.subheader(f"📋 매매내역 ({len(trades)}건)")

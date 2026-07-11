@@ -117,6 +117,37 @@ class PositionTests(unittest.TestCase):
         pos, _, _ = journal.compute_positions(trades)
         self.assertAlmostEqual(pos[("KR", "005930")]["avg_local"], 20000.0)
 
+    def test_realized_by_symbol_aggregates_and_sorts(self):
+        trades = [
+            _t("2026-01-05", "KR", "005930", "buy", 10, 10000, name="삼성전자"),
+            _t("2026-02-05", "KR", "005930", "sell", 5, 12000, name="삼성전자"),
+            _t("2026-02-06", "KR", "005930", "sell", 5, 13000, name="삼성전자"),
+            _t("2026-01-05", "US", "AAPL", "buy", 10, 100, fx=1300),
+            _t("2026-03-05", "US", "AAPL", "sell", 10, 90, fx=1300),
+        ]
+        _, realized, _ = journal.compute_positions(trades)
+        by_sym = journal.realized_by_symbol(realized)
+        self.assertEqual([a["code"] for a in by_sym], ["005930", "AAPL"])  # 이익 큰 순
+        samsung = by_sym[0]
+        self.assertEqual(samsung["sells"], 2)
+        self.assertAlmostEqual(samsung["pnl_krw"], 5 * 2000 + 5 * 3000)
+        self.assertAlmostEqual(samsung["ret"], 25000 / 100000)  # 매도분 원가 대비
+        aapl = by_sym[1]
+        self.assertAlmostEqual(aapl["pnl_krw"], 10 * (90 - 100) * 1300)
+        self.assertAlmostEqual(aapl["ret"], -0.1)
+
+    def test_realized_monthly_series_fills_gaps(self):
+        realized = [
+            {"date": "2026-01-10", "pnl_krw": 100.0},
+            {"date": "2026-04-10", "pnl_krw": -30.0},
+        ]
+        s = journal.realized_monthly_series(realized, today=date(2026, 5, 15))
+        self.assertEqual(len(s), 5)  # 1~5월, 빈 달 0
+        self.assertAlmostEqual(s.iloc[0], 100.0)
+        self.assertAlmostEqual(s.iloc[1], 0.0)
+        self.assertAlmostEqual(s.iloc[3], -30.0)
+        self.assertAlmostEqual(s.cumsum().iloc[-1], 70.0)
+
     def test_realized_by_period(self):
         realized = [
             {"date": "2025-12-10", "pnl_krw": 100.0},

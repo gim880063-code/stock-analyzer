@@ -289,6 +289,49 @@ def realized_by_period(realized: list[dict]) -> tuple[dict[str, float], dict[str
     return monthly, yearly
 
 
+def realized_by_symbol(realized: list[dict]) -> list[dict]:
+    """실현손익(원화)을 종목별로 합산. 손익 큰 순 정렬.
+
+    반환: [{"market", "code", "name", "pnl_krw", "cost_krw", "sells", "ret"}]
+      - ret: 매도분 원가 대비 실현수익률 (원가 0이면 None)
+    """
+    agg: dict[tuple, dict] = {}
+    for r in realized:
+        key = (r["market"], r["code"])
+        a = agg.setdefault(key, {
+            "market": r["market"], "code": r["code"], "name": r["name"],
+            "pnl_krw": 0.0, "cost_krw": 0.0, "sells": 0,
+        })
+        a["pnl_krw"] += r["pnl_krw"]
+        a["cost_krw"] += r["cost_krw"]
+        a["sells"] += 1
+        a["name"] = r["name"]
+    out = []
+    for a in agg.values():
+        a["ret"] = (a["pnl_krw"] / a["cost_krw"]) if a["cost_krw"] > 0 else None
+        out.append(a)
+    return sorted(out, key=lambda x: x["pnl_krw"], reverse=True)
+
+
+def realized_monthly_series(realized: list[dict], today: date | None = None) -> pd.Series:
+    """첫 실현 달부터 이번 달까지, 빈 달을 0으로 채운 월별 실현손익(원) 시계열.
+
+    인덱스는 월말 Timestamp — 그래프(막대·누적선)용.
+    """
+    monthly, _ = realized_by_period(realized)
+    if not monthly:
+        return pd.Series(dtype=float, name="실현손익(원)")
+    today = today or today_kst()
+    first = min(monthly)
+    y, m = int(first[:4]), int(first[5:7])
+    idx, vals = [], []
+    while (y, m) <= (today.year, today.month):
+        idx.append(pd.Timestamp(_month_end(y, m)))
+        vals.append(monthly.get(f"{y:04d}-{m:02d}", 0.0))
+        y, m = (y + 1, 1) if m == 12 else (y, m + 1)
+    return pd.Series(vals, index=idx, name="실현손익(원)")
+
+
 # ─────────── 평가액·수익률 (Modified Dietz) ───────────
 
 def _series_asof(series: pd.Series | None, d: date) -> float | None:
