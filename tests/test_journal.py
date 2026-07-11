@@ -315,6 +315,59 @@ class IncomeTests(unittest.TestCase):
             trades, lambda m, c: px, None, today=date(2026, 1, 31), incomes=[div, exp])
         self.assertAlmostEqual(monthly2[0]["ret"], expected, places=6)
 
+    def test_expense_with_stock_link(self):
+        e = journal.normalize_income({
+            "type": "expense", "date": "2026-05-31", "name": "해외주식 양도소득세",
+            "amount": 300000, "currency": "KRW",
+            "market": "us", "code": "tsla", "stock_name": "TSLA",
+        })
+        self.assertEqual((e["market"], e["code"]), ("US", "TSLA"))
+        with self.assertRaises(ValueError):  # 시장만 있고 종목코드 없음
+            journal.normalize_income({
+                "type": "expense", "date": "2026-05-31", "amount": 1,
+                "currency": "KRW", "market": "US", "code": "",
+            })
+        # 종목 연결 없는 세금도 여전히 허용
+        e2 = journal.normalize_income({
+            "type": "expense", "date": "2026-05-31", "name": "출금 수수료",
+            "amount": 5000, "currency": "KRW",
+        })
+        self.assertEqual((e2["market"], e2["code"]), ("", ""))
+
+    def test_taxes_by_year_and_symbol(self):
+        incomes = [
+            # TSLA 배당 $100, 세금 $15, 환율 1400 → 원천징수 21,000원
+            journal.normalize_income({"type": "dividend", "date": "2026-03-10",
+                                      "market": "US", "code": "TSLA",
+                                      "amount": 100, "tax": 15, "fx": 1400}),
+            # TSLA 연결 양도세 300,000원
+            journal.normalize_income({"type": "expense", "date": "2026-05-31",
+                                      "name": "양도소득세", "amount": 300000,
+                                      "currency": "KRW", "market": "US",
+                                      "code": "TSLA", "stock_name": "TSLA"}),
+            # 계좌 공통 수수료 5,000원
+            journal.normalize_income({"type": "expense", "date": "2026-06-01",
+                                      "name": "출금 수수료", "amount": 5000, "currency": "KRW"}),
+            # 작년 세금 (연도 분리 확인)
+            journal.normalize_income({"type": "expense", "date": "2025-05-31",
+                                      "name": "양도소득세", "amount": 100000, "currency": "KRW"}),
+        ]
+        by_year = journal.taxes_by_year(incomes)
+        self.assertAlmostEqual(by_year["2026"]["expense_krw"], 305000.0)
+        self.assertAlmostEqual(by_year["2026"]["dividend_tax_krw"], 21000.0)
+        self.assertAlmostEqual(by_year["2025"]["expense_krw"], 100000.0)
+
+        by_sym = journal.taxes_by_symbol(incomes)
+        tsla = next(a for a in by_sym if a["code"] == "TSLA")
+        self.assertAlmostEqual(tsla["expense_krw"], 300000.0)
+        self.assertAlmostEqual(tsla["dividend_tax_krw"], 21000.0)
+        self.assertAlmostEqual(tsla["total_krw"], 321000.0)
+        common = next(a for a in by_sym if a["code"] == "")
+        self.assertEqual(common["name"], "계좌 공통")
+        self.assertAlmostEqual(common["total_krw"], 105000.0)
+        # 정렬: 합계 큰 순
+        self.assertEqual(by_sym[0]["code"], "TSLA")
+
     def test_income_crud(self):
         fake = FakeStore()
         with patch.object(journal, "cloud_store", fake):

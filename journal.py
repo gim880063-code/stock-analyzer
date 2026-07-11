@@ -335,6 +335,14 @@ def normalize_income(raw: dict) -> dict:
         currency = str(raw.get("currency", "KRW")).upper()
         if currency not in ("KRW", "USD"):
             raise ValueError("currency는 KRW 또는 USD")
+        # 세금·비용은 선택적으로 특정 종목에 연결 가능 (종목별 세금 집계용)
+        market = str(raw.get("market", "") or "").upper()
+        if market:
+            if market not in ("KR", "US"):
+                raise ValueError("market은 KR 또는 US")
+            code = str(raw.get("code", "")).strip().upper() if market == "US" else str(raw.get("code", "")).strip()
+            if not code:
+                raise ValueError("종목 연결 시 종목코드 필요")
     fx = 1.0 if currency == "KRW" else float(raw.get("fx", 0))
     if fx <= 0:
         raise ValueError("환율은 0보다 커야 함")
@@ -346,6 +354,7 @@ def normalize_income(raw: dict) -> dict:
         "market": market,
         "code": code,
         "name": name,
+        "stock_name": str(raw.get("stock_name", "") or "").strip(),
         "amount": amount,
         "tax": tax,
         "currency": currency,
@@ -404,6 +413,55 @@ def dividends_by_symbol(incomes: list[dict]) -> dict[tuple, dict]:
         a["count"] += 1
         a["name"] = e["name"]
     return out
+
+
+def taxes_by_year(incomes: list[dict]) -> dict[str, dict]:
+    """연도별 세금 집계(원). 직접 기록한 세금·비용 + 배당 원천징수를 나눠 합산.
+
+    반환: {"2026": {"expense_krw", "dividend_tax_krw", "count"}}
+    """
+    out: dict[str, dict] = {}
+    for e in incomes:
+        y = e["date"][:4]
+        a = out.setdefault(y, {"expense_krw": 0.0, "dividend_tax_krw": 0.0, "count": 0})
+        if e["type"] == "expense":
+            a["expense_krw"] += e["amount"] * e["fx"]
+            a["count"] += 1
+        elif e["type"] == "dividend" and e.get("tax", 0) > 0:
+            a["dividend_tax_krw"] += e["tax"] * e["fx"]
+    return out
+
+
+def taxes_by_symbol(incomes: list[dict]) -> list[dict]:
+    """종목별 세금 합계(원) — 직접 기록(expense에 종목 연결) + 배당 원천징수.
+
+    종목 연결 없는 세금·비용은 '계좌 공통' 한 줄로 묶인다. 합계 큰 순 정렬.
+    """
+    agg: dict[tuple, dict] = {}
+
+    def _slot(market: str, code: str, name: str) -> dict:
+        key = (market, code)
+        a = agg.setdefault(key, {
+            "market": market, "code": code, "name": name or code or "계좌 공통",
+            "expense_krw": 0.0, "dividend_tax_krw": 0.0, "count": 0,
+        })
+        if name and (not a["name"] or a["name"] == a["code"]):
+            a["name"] = name
+        return a
+
+    for e in incomes:
+        if e["type"] == "expense":
+            a = _slot(e.get("market", ""), e.get("code", ""), e.get("stock_name", ""))
+            a["expense_krw"] += e["amount"] * e["fx"]
+            a["count"] += 1
+        elif e["type"] == "dividend" and e.get("tax", 0) > 0:
+            a = _slot(e["market"], e["code"], e["name"])
+            a["dividend_tax_krw"] += e["tax"] * e["fx"]
+            a["count"] += 1
+    out = list(agg.values())
+    for a in out:
+        a["total_krw"] = a["expense_krw"] + a["dividend_tax_krw"]
+    return sorted(out, key=lambda x: x["total_krw"], reverse=True)
 
 
 def merge_period_sums(*maps: dict[str, float]) -> dict[str, float]:

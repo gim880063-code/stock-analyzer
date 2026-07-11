@@ -342,12 +342,40 @@ with st.expander(f"💵 배당금·세금·기타 입력 ({len(incomes)}건)"):
         }
     else:
         is_expense = "세금" in inc_type_kor
+        exp_market, exp_code, exp_stock_name = "", "", ""
         with j2:
             inc_label = st.text_input(
                 "설명",
-                placeholder="예: 해외주식 양도소득세, 출금 수수료" if is_expense else "예: 이벤트 지원금, 이자",
+                placeholder="예: 해외주식 양도소득세, 세금 출금, 출금 수수료" if is_expense else "예: 이벤트 지원금, 이자",
                 key=f"inc_label_{igen}",
             )
+            if is_expense:
+                # 종목당 세금(양도세·해외 세금 출금 등)을 종목별로 집계할 수 있게 연결
+                link_stock = st.checkbox(
+                    "특정 종목 관련 세금 (종목별 세금 집계에 표시)",
+                    value=False, key="inc_linkstock",
+                )
+                if link_stock:
+                    exp_market_kor = st.radio(
+                        "시장", ["🇰🇷 한국", "🇺🇸 미국"], horizontal=True, key="inc_exp_market",
+                    )
+                    exp_market = "KR" if exp_market_kor.endswith("한국") else "US"
+                    if exp_market == "KR":
+                        try:
+                            _sd3 = _krx_names()
+                        except Exception:
+                            _sd3 = {}
+                        if _sd3:
+                            _opts3 = [f"{n} {c}" for c, n in sorted(_sd3.items(), key=lambda kv: kv[1])]
+                            _sel3 = st.selectbox("종목", options=_opts3, key="inc_exp_kr_stock")
+                            exp_code = _sel3.rsplit(maxsplit=1)[-1]
+                            exp_stock_name = _sd3.get(exp_code, exp_code)
+                        else:
+                            exp_code = st.text_input("종목코드 (6자리)", max_chars=6, key="inc_exp_kr_code").strip()
+                            exp_stock_name = exp_code
+                    else:
+                        exp_code = st.text_input("티커 (예: TSLA)", key="inc_exp_us_ticker").strip().upper()
+                        exp_stock_name = exp_code
             inc_cur_kor = st.radio("통화", ["원화", "달러"], horizontal=True, key="inc_cur")
             inc_currency = "KRW" if inc_cur_kor == "원화" else "USD"
             inc_amount = st.number_input(
@@ -366,6 +394,7 @@ with st.expander(f"💵 배당금·세금·기타 입력 ({len(incomes)}건)"):
             "type": "expense" if is_expense else "income",
             "date": inc_date.isoformat(), "name": inc_label,
             "amount": inc_amount, "currency": inc_currency, "fx": inc_fx,
+            "market": exp_market, "code": exp_code, "stock_name": exp_stock_name,
         }
 
     if st.button("💾 내역 저장", type="primary", use_container_width=True, key="inc_save"):
@@ -696,40 +725,108 @@ if div_incomes:
 else:
     st.caption("아직 배당 기록이 없습니다 — 위의 '배당금·세금·기타 입력'에서 추가하면 여기에 연도별·종목별로 모입니다.")
 
-# 세금·비용/기타 수입은 참고용 기록 — 접어서 표시
-if etc_incomes:
-    with st.expander(f"🧾 세금·비용·기타 기록 ({len(etc_incomes)}건) — 참고용, 자산 집계 미반영"):
+# ─────────── 세금 (자산 집계와 분리된 참고 기록) ───────────
+st.subheader("🧾 세금 — 양도소득세·해외 세금 출금·원천징수 모아보기 (자산 집계와 별도)")
+_tax_expenses = [e for e in etc_incomes if e["type"] == "expense"]
+_tax_dividend_krw = sum(e["tax"] * e["fx"] for e in div_incomes if e.get("tax", 0) > 0)
+if _tax_expenses or _tax_dividend_krw > 0:
+    _tax_by_year = journal.taxes_by_year(incomes)
+    _ty = _tax_by_year.get(this_year, {"expense_krw": 0.0, "dividend_tax_krw": 0.0})
+    _total_expense_krw = sum(e["amount"] * e["fx"] for e in _tax_expenses)
+    t1, t2, t3, t4 = st.columns(4)
+    t1.metric(f"{this_year}년 세금·비용", f"{_ty['expense_krw']:,.0f}원")
+    t2.metric(f"{this_year}년 배당 원천징수", f"{_ty['dividend_tax_krw']:,.0f}원")
+    t3.metric("누적 세금·비용", f"{_total_expense_krw:,.0f}원")
+    t4.metric("누적 총 세금", f"{_total_expense_krw + _tax_dividend_krw:,.0f}원")
+    st.caption(
+        "세금·비용 = 직접 기록한 양도소득세·해외 세금 출금·수수료 등. "
+        "배당 원천징수는 배당 기록에서 자동으로 모아 보여줍니다. 자산 집계(평가액·실현손익·수익률)에는 미반영."
+    )
+
+    tab_ty, tab_ts, tab_td = st.tabs(["연도별 표", "종목별 세금", "기록 내역"])
+
+    with tab_ty:
+        df_ty = pd.DataFrame([
+            {"연도": y,
+             "직접 기록(원)": v["expense_krw"],
+             "배당 원천징수(원)": v["dividend_tax_krw"],
+             "합계(원)": v["expense_krw"] + v["dividend_tax_krw"]}
+            for y, v in sorted(_tax_by_year.items())
+            if v["expense_krw"] > 0 or v["dividend_tax_krw"] > 0
+        ])
+        st.dataframe(
+            df_ty.style.format({
+                "직접 기록(원)": "{:,.0f}", "배당 원천징수(원)": "{:,.0f}", "합계(원)": "{:,.0f}",
+            }),
+            use_container_width=True, hide_index=True,
+        )
+        st.caption("그 해에 낸 세금이 얼마인지 — 달러 세금은 각 기록의 환율로 원화 환산.")
+
+    with tab_ts:
+        tax_sym = journal.taxes_by_symbol(incomes)
+        tax_sym = [a for a in tax_sym if a["total_krw"] > 0]
+        if tax_sym:
+            df_ts = pd.DataFrame([
+                {"시장": ("🇰🇷" if a["market"] == "KR" else "🇺🇸") if a["market"] else "—",
+                 "종목": f"{a['name']} ({a['code']})" if a["code"] else a["name"],
+                 "직접 기록(원)": a["expense_krw"] or None,
+                 "배당 원천징수(원)": a["dividend_tax_krw"] or None,
+                 "합계(원)": a["total_krw"]}
+                for a in tax_sym
+            ])
+            st.dataframe(
+                df_ts.style.format({
+                    "직접 기록(원)": "{:,.0f}", "배당 원천징수(원)": "{:,.0f}", "합계(원)": "{:,.0f}",
+                }, na_rep="-"),
+                use_container_width=True, hide_index=True,
+            )
+            st.caption(
+                "종목당 낸 세금 — 세금 입력 시 '특정 종목 관련'으로 연결한 기록 + 그 종목 배당의 원천징수. "
+                "종목 연결 없이 기록한 세금은 '계좌 공통'으로 표시됩니다."
+            )
+        else:
+            st.caption("아직 종목별 세금 기록이 없습니다.")
+
+    with tab_td:
         _type_kor = {"expense": "🧾 세금·비용", "income": "➕ 기타 수입"}
         etc_ordered = sorted(etc_incomes, key=lambda e: e.get("date", ""), reverse=True)
-        df_e = pd.DataFrame([
-            {"삭제": False,
-             "날짜": e["date"],
-             "유형": _type_kor.get(e["type"], e["type"]),
-             "설명": e["name"],
-             "금액": e["amount"],
-             "통화": "원" if e["currency"] == "KRW" else "달러",
-             "원화 환산": abs(journal.income_net_krw(e))}
-            for e in etc_ordered
-        ])
-        edited_e = st.data_editor(
-            df_e,
-            use_container_width=True,
-            hide_index=True,
-            disabled=[c for c in df_e.columns if c != "삭제"],
-            column_config={
-                "삭제": st.column_config.CheckboxColumn(width="small"),
-                "금액": st.column_config.NumberColumn(format="%,.2f"),
-                "원화 환산": st.column_config.NumberColumn(format="%,.0f"),
-            },
-            key=f"etc_editor_{hash(tuple(e['id'] for e in etc_ordered))}",
-        )
-        checked_e = [i for i, v in enumerate(edited_e["삭제"].tolist()) if v]
-        if checked_e:
-            if st.button(f"🗑️ 선택한 {len(checked_e)}건 삭제", key="etc_del_btn"):
-                journal.delete_incomes({etc_ordered[i]["id"] for i in checked_e})
-                st.rerun()
-        _etc_total = sum(journal.income_net_krw(e) for e in etc_ordered)
-        st.caption(f"합계(수입−비용): {_etc_total:+,.0f}원 — 기록·확인용이며 어떤 계산에도 반영되지 않습니다.")
+        if etc_ordered:
+            df_e = pd.DataFrame([
+                {"삭제": False,
+                 "날짜": e["date"],
+                 "유형": _type_kor.get(e["type"], e["type"]),
+                 "설명": e["name"],
+                 "종목": (f"{e.get('stock_name') or e['code']} ({e['code']})" if e.get("code") else "—"),
+                 "금액": e["amount"],
+                 "통화": "원" if e["currency"] == "KRW" else "달러",
+                 "원화 환산": abs(journal.income_net_krw(e))}
+                for e in etc_ordered
+            ])
+            edited_e = st.data_editor(
+                df_e,
+                use_container_width=True,
+                hide_index=True,
+                disabled=[c for c in df_e.columns if c != "삭제"],
+                column_config={
+                    "삭제": st.column_config.CheckboxColumn(width="small"),
+                    "금액": st.column_config.NumberColumn(format="%,.2f"),
+                    "원화 환산": st.column_config.NumberColumn(format="%,.0f"),
+                },
+                key=f"etc_editor_{hash(tuple(e['id'] for e in etc_ordered))}",
+            )
+            checked_e = [i for i, v in enumerate(edited_e["삭제"].tolist()) if v]
+            if checked_e:
+                if st.button(f"🗑️ 선택한 {len(checked_e)}건 삭제", key="etc_del_btn"):
+                    journal.delete_incomes({etc_ordered[i]["id"] for i in checked_e})
+                    st.rerun()
+            st.caption("직접 기록한 세금·비용·기타 수입 목록입니다. 배당 원천징수는 배당 섹션의 '받은 내역'에서 관리하세요.")
+        else:
+            st.caption("직접 기록한 세금·비용이 아직 없습니다 (배당 원천징수만 집계 중).")
+else:
+    st.caption(
+        "아직 세금 기록이 없습니다 — 위의 '배당금·세금·기타 입력'에서 '세금·비용'을 선택해 "
+        "양도소득세, 해외 세금 출금, 수수료 등을 기록하세요. 종목과 연결하면 종목별로 집계됩니다."
+    )
 
 # ─────────── 매매내역 ───────────
 st.subheader(f"📋 매매내역 ({len(trades)}건)")
