@@ -119,10 +119,12 @@ SCORE_WEIGHTS: dict[str, int] = {
     # 1배로 낮춤. 신호 가치는 있되 종목 selection에 미치는 비중은 줄임.
     "시장 국면": 1,
     "추세": 1,
-    # 모멘텀(RSI): 의심 항목(학술적으로 약함) + 2026-06 IC 검증서 역방향(-0.13) 확인
-    # → 종합점수 가중치 0 으로 중립화. score_momentum 은 계속 계산·표시(관찰용)되지만
-    #   총점엔 영향 없음. 데이터 더 쌓이면 walk-forward 로 재검토.
-    "모멘텀": 0,
+    # 모멘텀(RSI): 2026-06 IC -0.13 확인 → 가중치 0 중립화. 이후 표본이 쌓인
+    # 2026-07 재검증에서 두 시계 모두 더 강한 역방향(5일 IC -0.18/2,925건,
+    # 20일 IC -0.25/1,831건) — 이론(RSI 단기 평균회귀)과도 일치 → 역신호로 채택.
+    # 가중치 -1: RSI 상승모멘텀(+1)은 감점(과열 추격 페널티), 하락/과매도(-1)는
+    # 가점(평균회귀). 표시용 score_momentum 로직 자체는 불변.
+    "모멘텀": -1,
     "가격 리스크": 1,
     "가치": 1,
     "재무 건전성": 1,
@@ -130,6 +132,23 @@ SCORE_WEIGHTS: dict[str, int] = {
     # 정렬 위험 — 단기 신호가 동시 정렬된 정점 매수 페널티 (max=0, 음수 only)
     "정렬 위험": 1,
 }
+
+
+# ─────────── 집중(FOCUS) 게이트 ───────────
+# 2026-07 walk-forward 검증: 집중(상대강도·재무·가치) 점수가 20일 IC 0.165,
+# 상·하위⅓ 수익차 9.98%p 로 전 조합 중 가장 강한 신호. 반대로 이 부분합이
+# 음수인데 단기 신호(거래량·수급·공시)만으로 통과한 종목이 20일 성과를 깎았다.
+# → 통과 조건에 '집중 부분합 ≥ 0' 추가 (항목 데이터가 없으면 막지 않음 — 보수적).
+FOCUS_GATE_MIN = 0
+
+
+def focus_subscore(result: dict) -> int | None:
+    """집중(상대강도·재무·가치) 가중 부분합. 해당 항목이 하나도 없으면 None."""
+    scores = [s for s in (result.get("scores") or []) if isinstance(s, dict)]
+    if not any(s.get("name") in FOCUS_ITEMS for s in scores):
+        return None
+    total, _ = weighted_score(scores, FOCUS_ITEMS)
+    return total
 
 
 # ─────────── 업종 집중 상한 ───────────
@@ -213,7 +232,9 @@ def weighted_score(
             continue
         weight = SCORE_WEIGHTS.get(str(name), 1)
         total += int(item.get("score", 0)) * weight
-        max_possible += max(0, int(item.get("max", 0))) * weight
+        # 역신호(음수 가중, 예: 모멘텀 -1)도 '도달 가능한 최대 기여'는 +|w|×max
+        # (점수 -1 × 가중 -1 = +1) 이므로 절대값으로 합산 — max 가 음수로 줄면 안 됨.
+        max_possible += max(0, int(item.get("max", 0))) * abs(weight)
     return total, max_possible
 
 

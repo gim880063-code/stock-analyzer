@@ -196,13 +196,20 @@ class ScoringTests(unittest.TestCase):
         self.assertLessEqual(item["score"], 0)
         self.assertIn("과매도", item["msg"])
 
-    def test_momentum_neutralized_in_total_score(self):
-        # 모멘텀(RSI)은 의심 항목 + 역방향 IC(2026-06) 로 종합점수 가중치 0 (관찰용).
-        # +1 모멘텀을 더해도 총점·max 가 변하지 않아야 한다.
-        self.assertEqual(analyzer.SCORE_WEIGHTS["모멘텀"], 0)
+    def test_momentum_inverted_in_total_score(self):
+        # 모멘텀(RSI)은 2026-07 재검증에서 두 시계 모두 역방향(5d IC -0.18 /
+        # 20d -0.25) → 역신호로 채택(가중 -1). RSI 상승모멘텀(+1)은 감점,
+        # 하락/과매도(-1)는 가점. max 는 +|w|×max 로 양수 유지.
+        self.assertEqual(analyzer.SCORE_WEIGHTS["모멘텀"], -1)
         base = [{"name": "추세", "score": 1, "max": 1}]
-        with_mom = base + [{"name": "모멘텀", "score": 1, "max": 1}]
-        self.assertEqual(analyzer.weighted_score(with_mom), analyzer.weighted_score(base))
+        base_total, base_max = analyzer.weighted_score(base)
+        hot_total, hot_max = analyzer.weighted_score(
+            base + [{"name": "모멘텀", "score": 1, "max": 1}])
+        cold_total, _ = analyzer.weighted_score(
+            base + [{"name": "모멘텀", "score": -1, "max": 1}])
+        self.assertEqual(hot_total, base_total - 1)   # 과열 RSI → 감점
+        self.assertEqual(cold_total, base_total + 1)  # 과매도/하락 RSI → 가점
+        self.assertEqual(hot_max, base_max + 1)       # max 는 음수로 줄지 않음
 
     def test_opinion_text_stays_advisory_not_prescriptive(self):
         # 앱 철학: 매수/매도 추천 아님. 처방형("매수하세요") 금지, 서술형 유지.

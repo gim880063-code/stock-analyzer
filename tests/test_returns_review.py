@@ -175,6 +175,9 @@ class AdaptiveExpansionTests(unittest.TestCase):
 
 
 class ExpansionStateTests(unittest.TestCase):
+    """확대 판정은 적응(adaptive) 트랙 단독 — 관찰은 탈락 대조군이라 합산 금지
+    (2026-07 실측: 관찰이 가장 나빠서 합산하면 적응의 진짜 성과가 희석됨)."""
+
     def _patch(self, stats_by_kind):
         def fake_verify(score_type="total", horizon="all", min_hold_days=5, kind="picked"):
             n, e = stats_by_kind.get(kind, (0, None))
@@ -182,28 +185,29 @@ class ExpansionStateTests(unittest.TestCase):
         return patch.object(verifier, "verify_scouted", fake_verify)
 
     def test_expands_when_edge_proven(self):
-        with self._patch({"adaptive": (10, 3.0), "observed": (25, 2.0), "picked": (20, 0.5)}):
+        with self._patch({"adaptive": (25, 2.0), "picked": (20, 0.5)}):
             s = verifier.adaptive_expansion_state()
         self.assertTrue(s["expand"])
         self.assertEqual(s["max_n"], verifier.EXPANDED_MAX_N)
-        self.assertEqual(s["n_ao"], 35)
-        # 가중 평균: (10×3.0 + 25×2.0)/35 = 2.29 ≥ 0.5+1.0
-        self.assertAlmostEqual(s["avg_ao_excess"], 2.29, places=2)
+        self.assertEqual(s["n_adaptive"], 25)
+        self.assertAlmostEqual(s["avg_adaptive_excess"], 2.0, places=2)
 
-    def test_no_expand_small_sample(self):
-        with self._patch({"adaptive": (5, 5.0), "observed": (10, 5.0), "picked": (20, 0.0)}):
+    def test_observed_track_ignored(self):
+        # 관찰이 아무리 좋아도(대조군) 적응 표본이 모자라면 확대 안 함
+        with self._patch({"adaptive": (7, 5.0), "observed": (100, 9.9), "picked": (20, 0.0)}):
             s = verifier.adaptive_expansion_state()
         self.assertFalse(s["expand"])
         self.assertIn("표본 부족", s["reason"])
+        self.assertEqual(s["n_adaptive"], 7)
 
     def test_no_expand_negative_excess(self):
-        with self._patch({"adaptive": (20, -1.0), "observed": (20, -0.5), "picked": (20, 0.0)}):
+        with self._patch({"adaptive": (25, -0.5), "picked": (20, 0.0)}):
             s = verifier.adaptive_expansion_state()
         self.assertFalse(s["expand"])
         self.assertIn("≤ 0", s["reason"])
 
     def test_no_expand_insufficient_edge_vs_picked(self):
-        with self._patch({"adaptive": (20, 1.5), "observed": (20, 1.5), "picked": (20, 1.0)}):
+        with self._patch({"adaptive": (25, 1.5), "picked": (20, 1.0)}):
             s = verifier.adaptive_expansion_state()
         self.assertFalse(s["expand"])
         self.assertIn("우위 부족", s["reason"])
@@ -212,6 +216,30 @@ class ExpansionStateTests(unittest.TestCase):
         with patch.object(verifier, "verify_scouted", side_effect=RuntimeError("boom")):
             s = verifier.adaptive_expansion_state()
         self.assertFalse(s["expand"])
+
+
+class FocusGateTests(unittest.TestCase):
+    def test_focus_subscore_weighted(self):
+        r = {"scores": [
+            {"name": "시장 상대강도", "score": 1, "max": 1},   # 가중 2
+            {"name": "재무 건전성", "score": -1, "max": 1},    # 가중 1
+            {"name": "가치", "score": -1, "max": 1},           # 가중 1
+            {"name": "거래량", "score": 1, "max": 1},          # 집중 항목 아님
+        ]}
+        self.assertEqual(analyzer.focus_subscore(r), 2 - 1 - 1)  # = 0 (게이트 통과)
+
+    def test_focus_subscore_negative(self):
+        r = {"scores": [
+            {"name": "시장 상대강도", "score": -1, "max": 1},
+            {"name": "재무 건전성", "score": 1, "max": 1},
+            {"name": "가치", "score": -1, "max": 1},
+        ]}
+        self.assertEqual(analyzer.focus_subscore(r), -2)  # 게이트에서 제외 대상
+
+    def test_focus_subscore_none_when_no_items(self):
+        # 집중 항목 데이터가 하나도 없으면 None — 게이트가 막지 않음 (보수적)
+        r = {"scores": [{"name": "거래량", "score": 1, "max": 1}]}
+        self.assertIsNone(analyzer.focus_subscore(r))
 
 
 class TimeStopTests(unittest.TestCase):

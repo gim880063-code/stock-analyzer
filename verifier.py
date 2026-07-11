@@ -52,11 +52,14 @@ DEFAULT_MIN_HOLD_DAYS = 5
 IC_MIN_OBS = 30
 
 # ─────────── 적응 통과 확대 — 사전 등록 규칙 ───────────
-# 2026-06 과열장 대응 때 "관찰·적응 트랙이 실제 수익으로 검증되면 게이트 확대"로
+# 2026-06 과열장 대응 때 "적응 트랙이 실제 수익으로 검증되면 게이트 확대"로
 # 미뤄둔 단계. 사람이 눈짐작으로 켜는 게 아니라, 아래 기준을 코드가 축적 데이터로
 # 확인했을 때만 켜진다(기준 미달로 떨어지면 자동으로 다시 꺼짐 — 자기교정).
-EXPAND_HORIZON = "20d"   # 판정 시계 — 단기 신호와 기간이 맞고 완료 관측이 충분한 20영업일
-EXPAND_MIN_N = 30        # 관찰+적응 합산 최소 완료 관측 수 (이하면 노이즈로 간주)
+# 판정은 '적응(adaptive)' 트랙 단독 — 관찰(observed)은 통과 못 한 대조군이라
+# (2026-07 실측: 관찰 -8.2%p vs 통과 -9.0%p vs 적응 +0.5%p, 20d 시장대비)
+# 합산하면 게이트를 통과한 적응의 진짜 성과가 희석된다.
+EXPAND_HORIZON = "20d"   # 판정 시계 — 게이트 신호와 기간이 맞고 완료 관측이 쌓이는 20영업일
+EXPAND_MIN_N = 20        # 적응 트랙 최소 완료 관측 수 (이하면 노이즈로 간주)
 EXPAND_EDGE_PP = 1.0     # 통과(picked) 대비 시장초과 우위 최소 %p
 EXPANDED_MAX_N = 5       # 확대 시 적응 통과 최대 수 (기본 3)
 
@@ -64,31 +67,26 @@ EXPANDED_MAX_N = 5       # 확대 시 적응 통과 최대 수 (기본 3)
 def adaptive_expansion_state() -> dict:
     """축적된 검증 데이터로 '적응 통과 확대' 여부를 판정.
 
-    조건(모두, 20영업일 시계·시장 초과수익 기준):
-      1) 관찰(observed)+적응(adaptive) 합산 완료 관측 ≥ EXPAND_MIN_N
-      2) 합산 시장초과 평균 > 0  (시장을 실제로 이겼는가)
-      3) 통과(picked) 표본이 5개 이상이면: 합산 시장초과 ≥ picked + EXPAND_EDGE_PP
+    조건(모두, 20영업일 시계·시장 초과수익 기준, 적응 트랙 단독):
+      1) 적응(adaptive) 완료 관측 ≥ EXPAND_MIN_N
+      2) 적응 시장초과 평균 > 0  (시장을 실제로 이겼는가)
+      3) 통과(picked) 표본이 5개 이상이면: 적응 시장초과 ≥ picked + EXPAND_EDGE_PP
          (picked 표본이 너무 적으면 비교 불가 → 1·2만으로 판정)
     반환: {"expand", "max_n", "reason", 통계들} — 실패해도 예외 없이 expand=False.
     """
-    out: dict = {"expand": False, "max_n": None, "reason": "", "n_ao": 0}
+    out: dict = {"expand": False, "max_n": None, "reason": "", "n_adaptive": 0}
     try:
-        parts: list[tuple[int, float]] = []
-        for k in ("adaptive", "observed"):
-            r = verify_scouted(horizon=EXPAND_HORIZON, kind=k)
-            n = int(r.get("total_count") or 0)
-            e = r.get("overall_avg_excess")
-            if n > 0 and e is not None:
-                parts.append((n, float(e)))
-        n_ao = sum(n for n, _ in parts)
-        out["n_ao"] = n_ao
-        if n_ao < EXPAND_MIN_N:
-            out["reason"] = f"표본 부족 — 관찰·적응 {EXPAND_HORIZON} 완료 관측 {n_ao}건 < {EXPAND_MIN_N}건"
+        ra = verify_scouted(horizon=EXPAND_HORIZON, kind="adaptive")
+        n_a = int(ra.get("total_count") or 0)
+        e_a = ra.get("overall_avg_excess")
+        out["n_adaptive"] = n_a
+        if n_a < EXPAND_MIN_N or e_a is None:
+            out["reason"] = f"표본 부족 — 적응 {EXPAND_HORIZON} 완료 관측 {n_a}건 < {EXPAND_MIN_N}건"
             return out
-        avg_ao = sum(n * e for n, e in parts) / n_ao
-        out["avg_ao_excess"] = round(avg_ao, 2)
-        if avg_ao <= 0:
-            out["reason"] = f"관찰·적응 시장초과 평균 {avg_ao:+.2f}%p ≤ 0 — 확대 근거 없음"
+        avg_a = float(e_a)
+        out["avg_adaptive_excess"] = round(avg_a, 2)
+        if avg_a <= 0:
+            out["reason"] = f"적응 시장초과 평균 {avg_a:+.2f}%p ≤ 0 — 확대 근거 없음"
             return out
         rp = verify_scouted(horizon=EXPAND_HORIZON, kind="picked")
         n_p = int(rp.get("total_count") or 0)
@@ -96,9 +94,9 @@ def adaptive_expansion_state() -> dict:
         out["n_picked"] = n_p
         if n_p >= 5 and e_p is not None:
             out["avg_picked_excess"] = round(float(e_p), 2)
-            if avg_ao < float(e_p) + EXPAND_EDGE_PP:
+            if avg_a < float(e_p) + EXPAND_EDGE_PP:
                 out["reason"] = (
-                    f"우위 부족 — 관찰·적응 {avg_ao:+.2f}%p vs 통과 {float(e_p):+.2f}%p "
+                    f"우위 부족 — 적응 {avg_a:+.2f}%p vs 통과 {float(e_p):+.2f}%p "
                     f"(+{EXPAND_EDGE_PP:.0f}%p 이상 앞서야 확대)"
                 )
                 return out
@@ -108,7 +106,7 @@ def adaptive_expansion_state() -> dict:
             f" (통과 {out['avg_picked_excess']:+.2f}%p 대비 우위)"
             if "avg_picked_excess" in out else " (통과 표본 부족으로 자체 기준만 적용)"
         )
-        out["reason"] = f"관찰·적응 {n_ao}건 시장초과 {avg_ao:+.2f}%p{vs} — 게이트 확대"
+        out["reason"] = f"적응 {n_a}건 시장초과 {avg_a:+.2f}%p{vs} — 게이트 확대"
         return out
     except Exception as e:
         out["reason"] = f"판정 실패(기본 유지): {type(e).__name__}"

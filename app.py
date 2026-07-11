@@ -1998,6 +1998,36 @@ def _screen_worker(runner: dict, stock_dict_local: dict[str, str]) -> None:
             "reason": _build_drop_reason(r, min_score, kind="score"),
         })
 
+    # 집중(상대강도·재무·가치) 게이트 — 검증된 장기 신호가 음수인 후보 제외.
+    # (stale 모듈캐시로 함수가 없으면 조용히 건너뜀)
+    runner["focus_dropped"] = 0
+    try:
+        from analyzer import focus_subscore as _focus_subscore
+    except ImportError:
+        _focus_subscore = None
+    if _focus_subscore is not None:
+        try:
+            _fk = []
+            for r in results:
+                fs = _focus_subscore(r)
+                if fs is not None and fs < 0:
+                    dropped_details.append({
+                        "code": r.get("code"),
+                        "name": r.get("name", r.get("code")),
+                        "total": r.get("total"),
+                        "close": r.get("last_close"),
+                        "reason": (
+                            f"집중 신호(상대강도·재무·가치) 부분합 {fs:+d}점 < 0 — "
+                            "단기 수급만으로 통과, 검증된 장기 신호는 부정적"
+                        ),
+                    })
+                else:
+                    _fk.append(r)
+            runner["focus_dropped"] = len(results) - len(_fk)
+            results = _fk
+        except Exception:
+            pass
+
     runner["fresh_count"] = len(fresh_results)
     runner["fresh_top_score"] = max(
         (r.get("total", -999) for r in fresh_results), default=None,
@@ -3123,7 +3153,7 @@ if st.session_state.get("_view_mode") == "verifier":
             # 유형별 성과 비교 — 발굴/적응/관찰 관문 중 무엇이 실제로 돈이 됐는지.
             # 이 비교가 '적응 통과 자동 확대' 판정의 근거이기도 하다.
             _kind_rows = []
-            for _k, _kl in (("picked", "발굴(통과)"), ("adaptive", "적응 통과"), ("observed", "관찰")):
+            for _k, _kl in (("picked", "발굴(통과)"), ("adaptive", "적응 통과"), ("observed", "관찰(탈락 대조군)")):
                 try:
                     _kr = verifier.verify_scouted(
                         score_type=score_type, horizon=horizon,
@@ -3143,7 +3173,8 @@ if st.session_state.get("_view_mode") == "verifier":
             if len(_kind_rows) >= 2:
                 st.markdown("##### 유형별 성과 비교")
                 st.caption(
-                    "위 헤드라인은 전체 기준. 어느 관문(발굴/적응/관찰)이 실제로 돈이 됐는지 나란히 비교합니다."
+                    "위 헤드라인은 전체 기준. 어느 관문(발굴/적응/관찰)이 실제로 돈이 됐는지 나란히 비교합니다. "
+                    "'관찰'은 통과 못 한 종목의 대조군 — 관찰이 통과보다 나쁘면 걸러낸 게 옳았다는 뜻입니다."
                 )
                 st.dataframe(
                     pd.DataFrame(_kind_rows),
@@ -3159,7 +3190,7 @@ if st.session_state.get("_view_mode") == "verifier":
                     _exp_icon = "🟢 발동 중" if _exp_st.get("expand") else "⚪ 미발동"
                     st.caption(
                         f"**적응 통과 자동 확대: {_exp_icon}** — {_exp_st.get('reason')} · "
-                        "관찰·적응 트랙이 20일 시계에서 표본 30건 이상 + 시장초과 양수 + 통과 대비 "
+                        "적응 트랙이 20일 시계에서 완료 관측 20건 이상 + 시장초과 양수 + 통과 대비 "
                         "+1%p 이상 우위를 보이면, 스크리닝이 정상 국면에서도 주도주 게이트(적응 통과)를 "
                         "자동으로 열고 최대 5개까지 뽑습니다 (기준 미달로 돌아가면 자동 해제)."
                     )

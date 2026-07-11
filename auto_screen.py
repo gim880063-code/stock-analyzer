@@ -148,6 +148,30 @@ def run(universe: str, min_score: int, deep: bool, workers: int) -> dict:
             "total": r.get("total"), "close": r.get("last_close"),
             "reason": _build_drop_reason(r, min_score, kind="score"),
         })
+
+    # 집중(상대강도·재무·가치) 게이트 — 가장 검증된 신호 조합이 음수인 후보 제외
+    # (2026-07 walk-forward: 집중 20일 IC 0.165 · 상하위⅓ 수익차 9.98%p).
+    try:
+        from analyzer import focus_subscore
+        _fk = []
+        for r in candidates:
+            fs = focus_subscore(r)
+            if fs is not None and fs < 0:
+                dropped_details.append({
+                    "code": r.get("code"), "name": r.get("name", r.get("code")),
+                    "total": r.get("total"), "close": r.get("last_close"),
+                    "reason": (
+                        f"집중 신호(상대강도·재무·가치) 부분합 {fs:+d}점 < 0 — "
+                        "단기 수급만으로 통과, 검증된 장기 신호는 부정적"
+                    ),
+                })
+            else:
+                _fk.append(r)
+        if len(_fk) != len(candidates):
+            _log(f"집중 게이트: {len(candidates) - len(_fk)}개 제외")
+        candidates = _fk
+    except Exception as e:
+        _log(f"집중 게이트 실패(통과 목록 유지): {type(e).__name__}: {e}")
     _log(
         f"stage1 결과: fresh={len(fresh)} (stale 제외 {excluded_stale}, "
         f"surge 제외 {excluded_surge}) → min_score≥{min_score} 통과 {len(candidates)}"
