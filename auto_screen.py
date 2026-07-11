@@ -234,14 +234,24 @@ def run(universe: str, min_score: int, deep: bool, workers: int) -> dict:
 
     passed_codes = {r.get("code") for r in candidates}
 
-    # 과열장 적응 통과(adaptive) — 시장 대비 초과가 적정한 건전 주도주를 소수 통과시킨다.
+    # 적응 통과(adaptive) — 시장 대비 초과가 적정한 건전 주도주를 소수 통과시킨다.
     # 절대 급등이 아니라 '시장 대비'로 위험을 재 통과 0개를 막되 추격 매수는 배제.
+    # 확대 여부는 축적 데이터(관찰·적응 vs 통과 성과)로 코드가 판정 — 사전 등록 규칙.
     adaptive_added = 0
+    expansion = {"expand": False, "reason": "판정 안 함"}
     try:
-        adaptive = select_adaptive_picks(screened, regime, passed_codes=passed_codes)
+        from verifier import adaptive_expansion_state
+        expansion = adaptive_expansion_state()
+        _log(f"적응 확대 판정: {'🟢 ON' if expansion.get('expand') else 'off'} — {expansion.get('reason')}")
+    except Exception as e:
+        _log(f"적응 확대 판정 실패(기본 유지): {type(e).__name__}: {e}")
+    try:
+        adaptive = select_adaptive_picks(
+            screened, regime, passed_codes=passed_codes, expansion=expansion,
+        )
         adaptive_added, _ad_skip = scouted.add_adaptive_from_analysis(adaptive, universe=universe)
         passed_codes |= {r.get("code") for r in adaptive}
-        _log(f"과열장 적응 통과: {len(adaptive)}개 선정, +{adaptive_added} 기록")
+        _log(f"적응 통과: {len(adaptive)}개 선정, +{adaptive_added} 기록")
     except Exception as e:
         _log(f"적응 통과 기록 실패: {type(e).__name__}: {e}")
 

@@ -12,6 +12,7 @@ import analyzer  # noqa: E402
 import history  # noqa: E402
 import holdings_monitor  # noqa: E402
 import screening_history  # noqa: E402
+import verifier  # noqa: E402
 
 
 class FakeStore:
@@ -116,6 +117,101 @@ class ScreeningHistoryArchiveTests(unittest.TestCase):
             archive = fake.data[screening_history.ARCHIVE_FILENAME]
             self.assertIn(old_date, archive)  # 아카이브에 보존
             self.assertEqual(archive[old_date]["codes"], ["005930"])
+
+
+def _leader(code, total=5, rel=10.0, vol_ok=True, fund=1):
+    """적응 통과 게이트를 통과하는 건전 주도주 형태의 분석 결과."""
+    return {
+        "code": code, "name": code, "total": total,
+        "recent_surge": {"is_surge": True, "metrics": {"d20": 15.0}},
+        "scores": [
+            {"name": "시장 상대강도", "score": 1, "max": 1, "relative": rel},
+            {"name": "가격 리스크", "score": 0, "max": 0,
+             "msg": "" if vol_ok else "거래량 미동반 급등"},
+            {"name": "재무 건전성", "score": fund, "max": 1},
+            {"name": "성장성", "score": 0, "max": 1},
+        ],
+    }
+
+
+NORMAL = {"risk_off": False, "overheated": False, "sharp_drop": False}
+OVERHEATED = {"risk_off": False, "overheated": True, "sharp_drop": False}
+
+
+class AdaptiveExpansionTests(unittest.TestCase):
+    def test_normal_regime_needs_expansion(self):
+        screened = [_leader("A"), _leader("B")]
+        self.assertEqual(analyzer.select_adaptive_picks(screened, NORMAL), [])
+        picks = analyzer.select_adaptive_picks(
+            screened, NORMAL, expansion={"expand": True, "max_n": 5})
+        self.assertEqual([r["code"] for r in picks], ["A", "B"])
+
+    def test_defense_regimes_block_even_when_expanded(self):
+        screened = [_leader("A")]
+        exp = {"expand": True, "max_n": 5}
+        for regime in ({"risk_off": True, "overheated": False, "sharp_drop": False},
+                       {"risk_off": False, "overheated": True, "sharp_drop": True}):
+            self.assertEqual(
+                analyzer.select_adaptive_picks(screened, regime, expansion=exp), [])
+
+    def test_overheated_legacy_path_unchanged(self):
+        screened = [_leader(f"C{i}", total=10 - i) for i in range(5)]
+        picks = analyzer.select_adaptive_picks(screened, OVERHEATED)
+        self.assertEqual(len(picks), analyzer.ADAPTIVE_MAX_N)  # 기본 3
+        picks_exp = analyzer.select_adaptive_picks(
+            screened, OVERHEATED, expansion={"expand": True, "max_n": 5})
+        self.assertEqual(len(picks_exp), 5)  # 확대 시 5
+
+    def test_gates_still_apply_when_expanded(self):
+        screened = [
+            _leader("OK"),
+            _leader("NOVOL", vol_ok=False),        # 거래량 미동반
+            _leader("WEAKFUND", fund=-1),          # 펀더 악화
+            _leader("TOOHOT", rel=30.0),           # 시장대비 과다 초과
+        ]
+        picks = analyzer.select_adaptive_picks(
+            screened, NORMAL, expansion={"expand": True, "max_n": 5})
+        self.assertEqual([r["code"] for r in picks], ["OK"])
+
+
+class ExpansionStateTests(unittest.TestCase):
+    def _patch(self, stats_by_kind):
+        def fake_verify(score_type="total", horizon="all", min_hold_days=5, kind="picked"):
+            n, e = stats_by_kind.get(kind, (0, None))
+            return {"total_count": n, "overall_avg_excess": e}
+        return patch.object(verifier, "verify_scouted", fake_verify)
+
+    def test_expands_when_edge_proven(self):
+        with self._patch({"adaptive": (10, 3.0), "observed": (25, 2.0), "picked": (20, 0.5)}):
+            s = verifier.adaptive_expansion_state()
+        self.assertTrue(s["expand"])
+        self.assertEqual(s["max_n"], verifier.EXPANDED_MAX_N)
+        self.assertEqual(s["n_ao"], 35)
+        # 가중 평균: (10×3.0 + 25×2.0)/35 = 2.29 ≥ 0.5+1.0
+        self.assertAlmostEqual(s["avg_ao_excess"], 2.29, places=2)
+
+    def test_no_expand_small_sample(self):
+        with self._patch({"adaptive": (5, 5.0), "observed": (10, 5.0), "picked": (20, 0.0)}):
+            s = verifier.adaptive_expansion_state()
+        self.assertFalse(s["expand"])
+        self.assertIn("표본 부족", s["reason"])
+
+    def test_no_expand_negative_excess(self):
+        with self._patch({"adaptive": (20, -1.0), "observed": (20, -0.5), "picked": (20, 0.0)}):
+            s = verifier.adaptive_expansion_state()
+        self.assertFalse(s["expand"])
+        self.assertIn("≤ 0", s["reason"])
+
+    def test_no_expand_insufficient_edge_vs_picked(self):
+        with self._patch({"adaptive": (20, 1.5), "observed": (20, 1.5), "picked": (20, 1.0)}):
+            s = verifier.adaptive_expansion_state()
+        self.assertFalse(s["expand"])
+        self.assertIn("우위 부족", s["reason"])
+
+    def test_never_raises(self):
+        with patch.object(verifier, "verify_scouted", side_effect=RuntimeError("boom")):
+            s = verifier.adaptive_expansion_state()
+        self.assertFalse(s["expand"])
 
 
 class TimeStopTests(unittest.TestCase):

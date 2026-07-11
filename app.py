@@ -2127,9 +2127,22 @@ def _screen_worker(runner: dict, stock_dict_local: dict[str, str]) -> None:
     runner["momentum_picks"] = []
     passed_codes = {r.get("code") for r in results}
 
-    # 과열장 적응 통과 — 시장 대비 초과가 적정한 건전 주도주를 소수 통과(수익률 게이트).
+    # 적응 통과 — 시장 대비 초과가 적정한 건전 주도주를 소수 통과(수익률 게이트).
+    # 확대 여부는 축적 데이터로 판정(verifier 사전 등록 규칙). stale 모듈캐시 대비 가드.
+    _expansion = {"expand": False, "reason": "판정 안 함"}
     try:
-        adaptive = select_adaptive_picks(screened, regime, passed_codes=passed_codes)
+        from verifier import adaptive_expansion_state as _aes
+        _expansion = _aes()
+    except Exception:
+        pass
+    runner["adaptive_expansion"] = _expansion
+    try:
+        try:
+            adaptive = select_adaptive_picks(
+                screened, regime, passed_codes=passed_codes, expansion=_expansion,
+            )
+        except TypeError:  # 배포 직후 구버전 analyzer 캐시 — 기존 시그니처로 폴백
+            adaptive = select_adaptive_picks(screened, regime, passed_codes=passed_codes)
         ad_added, _ad_skip = scouted.add_adaptive_from_analysis(adaptive, universe=universe)
         runner["adaptive_added"] = ad_added
         runner["adaptive_picks"] = adaptive
@@ -3010,30 +3023,15 @@ if st.session_state.get("_view_mode") == "verifier":
                 help="발굴 직후 종목은 신호가 작동할 시간이 없어 통계에 노이즈를 만듦.",
             )
 
-        track = st.radio(
-            "추적 종류",
-            options=["picked", "adaptive", "observed", "all"],
-            format_func=lambda k: {
-                "picked": "발굴(통과) — 정상장 매수 후보",
-                "adaptive": "과열장 적응 통과 — 시장대비 게이트 통과",
-                "observed": "관찰 — 통과 못 했지만 추적",
-                "all": "전체",
-            }[k],
-            horizontal=True,
-            key="sim_kind",
-            help=(
-                "발굴: 정상장에서 종합점수 기준을 통과해 가상 매수한 종목. "
-                "과열장 적응 통과: 과열장에서 시장 대비 초과·거래량·펀더 게이트를 통과한 주도주. "
-                "관찰: 통과 못 했지만 점수 검증용으로 추적하는 종목. "
-                "서로 섞으면 성과가 희석되므로 기본은 '발굴'만 봅니다."
-            ),
-        )
-
+        # 헤드라인은 전체(모든 추적 종목) 기준으로 통일 — 유형(발굴/적응/관찰)을
+        # 화면에서 고르게 하지 않는다. 유형별 성과는 아래 비교표로 한눈에 보여주고,
+        # 데이터의 유형 태그는 '어떤 관문이 실제로 돈이 됐는지' 검증 + 적응 통과
+        # 자동 확대 판정의 원료로 계속 쓰인다.
         result = verifier.verify_scouted(
             score_type=score_type,
             horizon=horizon,
             min_hold_days=min_hold_days,
-            kind=track,
+            kind="all",
         )
 
         _lvl, _msg = _verdict_scout(result)
@@ -3121,6 +3119,52 @@ if st.session_state.get("_view_mode") == "verifier":
                     st.caption(f"ℹ️ 보유기간 {min_hold_days}일 미만인 발굴 {excluded}개 제외됨.")
                 else:
                     st.caption(f"ℹ️ {horizon} 시계 미도달 발굴 {excluded}개 제외됨.")
+
+            # 유형별 성과 비교 — 발굴/적응/관찰 관문 중 무엇이 실제로 돈이 됐는지.
+            # 이 비교가 '적응 통과 자동 확대' 판정의 근거이기도 하다.
+            _kind_rows = []
+            for _k, _kl in (("picked", "발굴(통과)"), ("adaptive", "적응 통과"), ("observed", "관찰")):
+                try:
+                    _kr = verifier.verify_scouted(
+                        score_type=score_type, horizon=horizon,
+                        min_hold_days=min_hold_days, kind=_k,
+                    )
+                except Exception:
+                    continue
+                if not _kr.get("total_count"):
+                    continue
+                _kind_rows.append({
+                    "유형": _kl,
+                    "종목 수": _kr["total_count"],
+                    "평균 수익률%": _kr.get("overall_avg"),
+                    "시장 대비%p": _kr.get("overall_avg_excess"),
+                    "승률%": _kr.get("overall_win_rate"),
+                })
+            if len(_kind_rows) >= 2:
+                st.markdown("##### 유형별 성과 비교")
+                st.caption(
+                    "위 헤드라인은 전체 기준. 어느 관문(발굴/적응/관찰)이 실제로 돈이 됐는지 나란히 비교합니다."
+                )
+                st.dataframe(
+                    pd.DataFrame(_kind_rows),
+                    hide_index=True, use_container_width=True,
+                    column_config={
+                        "평균 수익률%": st.column_config.NumberColumn(format="%+.2f"),
+                        "시장 대비%p": st.column_config.NumberColumn(format="%+.2f"),
+                        "승률%": st.column_config.NumberColumn(format="%.0f"),
+                    },
+                )
+                try:
+                    _exp_st = verifier.adaptive_expansion_state()
+                    _exp_icon = "🟢 발동 중" if _exp_st.get("expand") else "⚪ 미발동"
+                    st.caption(
+                        f"**적응 통과 자동 확대: {_exp_icon}** — {_exp_st.get('reason')} · "
+                        "관찰·적응 트랙이 20일 시계에서 표본 30건 이상 + 시장초과 양수 + 통과 대비 "
+                        "+1%p 이상 우위를 보이면, 스크리닝이 정상 국면에서도 주도주 게이트(적응 통과)를 "
+                        "자동으로 열고 최대 5개까지 뽑습니다 (기준 미달로 돌아가면 자동 해제)."
+                    )
+                except Exception:
+                    pass
 
             st.markdown("##### 점수 분위별 통계")
             st.caption(

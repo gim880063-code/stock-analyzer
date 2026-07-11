@@ -989,17 +989,24 @@ def select_adaptive_picks(
     passed_codes: set | None = None,
     *,
     max_n: int = ADAPTIVE_MAX_N,
+    expansion: dict | None = None,
 ) -> list[dict]:
-    """과열장 한정, 시장 대비 초과가 적정한 건전 주도주를 '통과(adaptive)'로 선정.
+    """시장 대비 초과가 적정한 건전 주도주를 '통과(adaptive)'로 선정.
 
+    기본은 과열장 한정. expansion(verifier.adaptive_expansion_state 결과)이
+    expand=True 면 정상 국면에서도 동작하고 max_n 이 확대된다 — 축적 데이터가
+    '관찰·적응 트랙이 통과보다 낫다'를 보여줄 때만 켜지는 사전 등록 규칙.
     게이트(모두 충족): surge & 시장 상대강도 초과가 REL_MIN~REL_MAX %p & 거래량 동반 &
     RSI 극단 아님 & 펀더 받침. 통과분을 종합점수(total) 내림차순 상위 max_n 반환.
     신규 분석 호출 없이 기존 result 필드만 사용한다.
     """
-    if not (regime and regime.get("overheated")):
+    expanded = bool(expansion and expansion.get("expand"))
+    if regime and (regime.get("sharp_drop") or regime.get("risk_off")):
+        return []  # 급락·리스크오프 — 확대 여부와 무관하게 추격성 통과 중단 (방어 우선)
+    if not expanded and not (regime and regime.get("overheated")):
         return []
-    if regime.get("sharp_drop"):
-        return []  # 급락 국면 — 추격성 적응 통과 중단 (수익률 방어 우선)
+    if expanded and expansion.get("max_n"):
+        max_n = int(expansion["max_n"])
     passed = passed_codes or set()
     cand: list[dict] = []
     for r in screened:
