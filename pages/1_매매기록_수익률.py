@@ -1,0 +1,377 @@
+"""매매기록 · 수익률 페이지 — 한국+미국 주식 매매 장부와 월간/연간 수익률.
+
+app.py 와 독립된 새 페이지: 여기서 크래시가 나도 메인 분석 화면은 영향 없다.
+데이터는 Gist(trades.json)에 저장되어 재배포 후에도 계속 누적된다.
+"""
+import sys
+from datetime import datetime, timedelta
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+import pandas as pd
+import streamlit as st
+
+import cloud_store
+import journal
+import quotes
+
+
+st.set_page_config(
+    page_title="매매기록 · 수익률",
+    page_icon="https://abs.twimg.com/emoji/v2/72x72/1f4d2.png",
+    layout="wide",
+)
+
+
+def _check_password() -> bool:
+    """app.py 와 동일한 비밀번호 보호 — 세션 키를 공유해 한 번만 입력."""
+    try:
+        configured = st.secrets.get("APP_PASSWORD", "")
+    except (FileNotFoundError, AttributeError, Exception):
+        return True
+    if not configured:
+        return True
+    if st.session_state.get("_authenticated"):
+        return True
+    st.markdown("## 🔒 매매기록 · 수익률")
+    st.caption("비밀번호를 입력하세요")
+    pw = st.text_input("비밀번호", type="password", label_visibility="collapsed")
+    if pw == configured:
+        st.session_state["_authenticated"] = True
+        st.rerun()
+    elif pw:
+        st.error("비밀번호가 틀렸습니다.")
+    return False
+
+
+if not _check_password():
+    st.stop()
+
+st.title("📒 매매기록 · 수익률")
+st.caption(
+    "한국·미국 주식 매매를 기록하면 보유 현황과 월간·연간 수익률을 자동 계산합니다. "
+    "미국 주식은 체결 환율로 원화 환산(환차손익 포함). 데이터는 Gist에 저장되어 계속 누적됩니다."
+)
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def _krx_names() -> dict[str, str]:
+    """KRX 전 종목 이름맵 (코드→이름). 실패 시 예외 → 캐시 안 됨 → 다음에 재시도."""
+    from analyzer import all_korean_stocks
+    return all_korean_stocks()
+
+
+GREEN, RED = "#1f7a3a", "#a3201a"
+
+
+def _color_pnl(v) -> str:
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return ""
+    return f"color: {GREEN}" if v > 0 else (f"color: {RED}" if v < 0 else "")
+
+
+# ─────────── 데이터 로드·계산 ───────────
+try:
+    trades = journal.load_trades()
+except Exception as e:
+    st.error(f"매매내역을 불러오지 못했습니다: {type(e).__name__}: {e}")
+    st.stop()
+
+positions, realized, warnings = journal.compute_positions(trades)
+fx_now = quotes.current_usdkrw()
+
+monthly = []
+if trades:
+    first_date = datetime.strptime(journal.sorted_trades(trades)[0]["date"], "%Y-%m-%d").date()
+    with st.spinner("가격·환율 데이터 조회 중..."):
+        fx_series = quotes.usdkrw_history(first_date - timedelta(days=10))
+
+        def _price_fn(market: str, code: str):
+            return quotes.price_history(market, code, first_date - timedelta(days=10))
+
+        try:
+            monthly = journal.compute_monthly_returns(trades, _price_fn, fx_series)
+        except Exception as e:
+            st.warning(f"수익률 계산 실패 (가격 데이터 문제일 수 있음): {type(e).__name__}: {e}")
+
+yearly = journal.yearly_returns(monthly)
+realized_monthly, realized_yearly = journal.realized_by_period(realized)
+
+# 보유 현황 평가 (현재가 기준)
+rows = []
+total_cost_krw = 0.0
+total_value_krw = 0.0
+unpriced = 0
+for (market, code), p in sorted(positions.items(), key=lambda kv: (kv[0][0], kv[1]["name"])):
+    px = quotes.current_price(market, code)
+    fx = (fx_now or 0.0) if market == "US" else 1.0
+    cost_krw = p["qty"] * p["avg_krw"]
+    if px is None or (market == "US" and not fx):
+        unpriced += 1
+        value_krw = cost_krw  # 가격 조회 실패 시 매입가로 평가 (손익 0 처리)
+        px_disp = None
+    else:
+        value_krw = p["qty"] * px * fx
+        px_disp = px
+    total_cost_krw += cost_krw
+    total_value_krw += value_krw
+    rows.append({
+        "시장": "🇰🇷 한국" if market == "KR" else "🇺🇸 미국",
+        "종목": f"{p['name']} ({code})",
+        "수량": p["qty"],
+        "평균단가": p["avg_local"],
+        "현재가": px_disp,
+        "매입금(원)": cost_krw,
+        "평가액(원)": value_krw,
+        "평가손익(원)": value_krw - cost_krw,
+        "수익률%": (value_krw / cost_krw - 1) * 100 if cost_krw > 0 else None,
+    })
+for r in rows:
+    r["비중%"] = (r["평가액(원)"] / total_value_krw * 100) if total_value_krw > 0 else None
+
+# ─────────── 요약 ───────────
+total_pnl = total_value_krw - total_cost_krw
+total_realized = sum(r["pnl_krw"] for r in realized)
+this_year = journal.today_kst().strftime("%Y")
+year_now = next((y for y in yearly if y["year"] == this_year), None)
+
+c1, c2, c3, c4, c5 = st.columns(5)
+c1.metric("총 평가액", f"{total_value_krw:,.0f}원")
+c2.metric(
+    "평가손익 (보유분)",
+    f"{total_pnl:+,.0f}원",
+    f"{(total_value_krw / total_cost_krw - 1) * 100:+.2f}%" if total_cost_krw > 0 else None,
+)
+c3.metric("누적 실현손익", f"{total_realized:+,.0f}원")
+c4.metric(
+    f"{this_year}년 수익률",
+    f"{year_now['ret'] * 100:+.2f}%" if year_now and year_now["ret"] is not None else "-",
+    f"{year_now['pnl_krw']:+,.0f}원" if year_now else None,
+)
+c5.metric("환율 USD/KRW", f"{fx_now:,.2f}원" if fx_now else "조회 실패")
+st.caption("가격은 최근 종가 기준(실시간 아님). 미국 주식 평가는 현재 환율로 환산합니다.")
+if unpriced:
+    st.warning(f"⚠️ {unpriced}개 종목의 현재가 조회에 실패해 매입가로 평가했습니다. (티커 확인 필요)")
+for w in warnings:
+    st.warning(f"⚠️ {w}")
+
+# ─────────── 매매 입력 ───────────
+if not trades:
+    st.info(
+        "**처음 시작하기** — 지금 보유 중인 종목부터 등록하세요. "
+        "실제 매수일과 평균단가로 '매수' 기록을 넣으면 그 시점부터의 수익률이 자동 계산됩니다. "
+        "미국 주식은 매수일의 환율이 자동으로 채워집니다(수정 가능)."
+    )
+
+with st.expander("➕ 매매 입력 (매수/매도)", expanded=not trades):
+    in1, in2, in3 = st.columns([1, 1, 2])
+    with in1:
+        market_kor = st.radio("시장", ["🇰🇷 한국", "🇺🇸 미국"], horizontal=True, key="in_market")
+        market = "KR" if market_kor.endswith("한국") else "US"
+        side_kor = st.radio("구분", ["매수", "매도"], horizontal=True, key="in_side")
+        side = "buy" if side_kor == "매수" else "sell"
+    with in2:
+        trade_date = st.date_input(
+            "체결일", value=journal.today_kst(),
+            min_value=datetime(2000, 1, 1).date(), max_value=journal.today_kst(),
+            key="in_date",
+        )
+        qty = st.number_input("수량 (주)", min_value=0.0, step=1.0, value=0.0, key="in_qty")
+    with in3:
+        code, name = "", ""
+        if market == "KR":
+            try:
+                stock_dict = _krx_names()
+            except Exception:
+                stock_dict = {}
+            if stock_dict:
+                opts = [f"{n} {c}" for c, n in sorted(stock_dict.items(), key=lambda kv: kv[1])]
+                sel = st.selectbox(
+                    "종목 검색 (한글 이름 또는 코드)", options=opts, key="in_kr_stock",
+                    help="입력창에 '삼성', '005930' 등을 타이핑하면 검색됩니다",
+                )
+                code = sel.rsplit(maxsplit=1)[-1]
+                name = stock_dict.get(code, code)
+            else:
+                code = st.text_input("종목코드 (6자리)", max_chars=6, key="in_kr_code").strip()
+                name = st.text_input("종목명", key="in_kr_name").strip() or code
+            price = st.number_input("단가 (원)", min_value=0.0, step=100.0, value=0.0, key="in_price_kr")
+            fx, fee_label = 1.0, "수수료+세금 (원)"
+        else:
+            code = st.text_input("티커 (예: AAPL, TSLA)", key="in_us_ticker").strip().upper()
+            name = code
+            price = st.number_input("단가 (달러)", min_value=0.0, step=0.01, value=0.0,
+                                    format="%.2f", key="in_price_us")
+            fx_default = quotes.usdkrw_at(trade_date) or fx_now or 1300.0
+            # key 에 날짜를 넣어 체결일을 바꾸면 그 날짜의 환율이 새로 채워지게 함
+            fx = st.number_input(
+                "체결 환율 (원/달러) — 자동 조회됨, 수정 가능",
+                min_value=0.0, step=0.1, value=float(fx_default), format="%.2f",
+                key=f"in_fx_{trade_date.isoformat()}",
+            )
+            fee_label = "수수료 (달러)"
+        fee = st.number_input(fee_label, min_value=0.0, step=0.01, value=0.0, key="in_fee")
+        note = st.text_input("메모 (선택)", key="in_note")
+
+    if st.button("💾 기록 저장", type="primary", use_container_width=True):
+        try:
+            t = journal.add_trade({
+                "date": trade_date.isoformat(), "market": market, "code": code,
+                "name": name, "side": side, "qty": qty, "price": price,
+                "fx": fx, "fee": fee, "note": note,
+            })
+            st.success(f"저장됨: {t['date']} {t['name']} {side_kor} {t['qty']:g}주 @ {t['price']:,g}")
+            st.rerun()
+        except ValueError as e:
+            st.error(f"입력 오류: {e}")
+        except Exception as e:
+            st.error(f"저장 실패: {type(e).__name__}: {e}")
+
+# ─────────── 보유 현황 ───────────
+st.subheader("💼 보유 현황")
+if rows:
+    df_pos = pd.DataFrame(rows)
+    styled = df_pos.style.map(_color_pnl, subset=["평가손익(원)", "수익률%"]).format({
+        "수량": "{:,.0f}",
+        "평균단가": "{:,.2f}",
+        "현재가": lambda v: "-" if v is None or pd.isna(v) else f"{v:,.2f}",
+        "매입금(원)": "{:,.0f}",
+        "평가액(원)": "{:,.0f}",
+        "평가손익(원)": "{:+,.0f}",
+        "수익률%": "{:+.2f}",
+        "비중%": "{:.1f}",
+    }, na_rep="-")
+    st.dataframe(styled, use_container_width=True, hide_index=True)
+    st.caption("평균단가·현재가는 매매 통화 기준(한국=원, 미국=달러). 매입금·평가액·손익은 원화 환산.")
+else:
+    st.caption("보유 중인 종목이 없습니다. 위에서 매매를 입력하세요.")
+
+# ─────────── 수익률 ───────────
+st.subheader("📈 수익률 (월간·연간)")
+if monthly:
+    tab_ret, tab_cum, tab_pnl = st.tabs(["월간 수익률 표", "누적 수익률", "월간 손익(원)"])
+
+    with tab_ret:
+        # 연도 × 월 피벗 + 연간 열
+        years = sorted({m["ym"][:4] for m in monthly})
+        table = {}
+        for y in years:
+            row = {f"{mm}월": None for mm in range(1, 13)}
+            for m in monthly:
+                if m["ym"][:4] == y and m["ret"] is not None:
+                    row[f"{int(m['ym'][5:7])}월"] = m["ret"] * 100
+            yr = next((v for v in yearly if v["year"] == y), None)
+            row["연간"] = yr["ret"] * 100 if yr and yr["ret"] is not None else None
+            table[y] = row
+        df_ret = pd.DataFrame(table).T
+        styled_ret = df_ret.style.map(_color_pnl).format("{:+.2f}%", na_rep="")
+        st.dataframe(styled_ret, use_container_width=True)
+        st.caption(
+            "월중 매수·매도 금액을 기간 가중해 반영한 수익률(Modified Dietz) — "
+            "'주식에 들어가 있던 돈' 대비 성과입니다. 이번 달은 오늘까지 기준."
+        )
+
+    with tab_cum:
+        curve = journal.cumulative_curve(monthly)
+        if len(curve) > 0:
+            st.line_chart(curve, height=280)
+            st.caption(f"첫 기록({monthly[0]['ym']}) 이후 월간 수익률을 누적 연결한 값입니다.")
+
+    with tab_pnl:
+        pnl_series = pd.Series(
+            [m["pnl_krw"] for m in monthly],
+            index=[m["ym"] for m in monthly], name="월간 손익(원)",
+        )
+        st.bar_chart(pnl_series, height=280)
+        df_y = pd.DataFrame([
+            {"연도": y["year"],
+             "손익(원)": y["pnl_krw"],
+             "수익률": y["ret"] * 100 if y["ret"] is not None else None}
+            for y in yearly
+        ])
+        styled_y = df_y.style.map(_color_pnl, subset=["손익(원)", "수익률"]).format(
+            {"손익(원)": "{:+,.0f}", "수익률": "{:+.2f}%"}, na_rep="-",
+        )
+        st.dataframe(styled_y, use_container_width=True, hide_index=True)
+        st.caption("손익 = 실현손익 + 보유분 평가손익 변동 (원화).")
+else:
+    st.caption("매매를 입력하면 첫 매매가 있는 달부터 수익률이 계산됩니다.")
+
+# ─────────── 실현손익 ───────────
+with st.expander(f"💰 실현손익 상세 — 매도로 확정된 손익 (누적 {total_realized:+,.0f}원)"):
+    if realized:
+        if realized_monthly:
+            s_rm = pd.Series(realized_monthly, name="실현손익(원)").sort_index()
+            st.bar_chart(s_rm, height=220)
+        df_r = pd.DataFrame([
+            {"매도일": r["date"],
+             "시장": "🇰🇷" if r["market"] == "KR" else "🇺🇸",
+             "종목": f"{r['name']} ({r['code']})",
+             "수량": r["qty"],
+             "실현손익(원)": r["pnl_krw"]}
+            for r in reversed(realized)
+        ])
+        styled_r = df_r.style.map(_color_pnl, subset=["실현손익(원)"]).format(
+            {"수량": "{:,.0f}", "실현손익(원)": "{:+,.0f}"},
+        )
+        st.dataframe(styled_r, use_container_width=True, hide_index=True)
+        st.caption("이동평균법 기준. 미국 주식은 매수·매도 각각의 체결 환율로 환산해 환차손익 포함.")
+    else:
+        st.caption("아직 매도 기록이 없습니다.")
+
+# ─────────── 매매내역 ───────────
+st.subheader(f"📋 매매내역 ({len(trades)}건)")
+if trades:
+    realized_by_id = {r["trade_id"]: r["pnl_krw"] for r in realized}
+    ordered = list(reversed(journal.sorted_trades(trades)))  # 최신이 위로
+    df_hist = pd.DataFrame([
+        {"삭제": False,
+         "날짜": t["date"],
+         "시장": "🇰🇷" if t["market"] == "KR" else "🇺🇸",
+         "종목": f"{t['name']} ({t['code']})",
+         "구분": "매수" if t["side"] == "buy" else "매도",
+         "수량": t["qty"],
+         "단가": t["price"],
+         "환율": t["fx"] if t["market"] == "US" else None,
+         "수수료": t["fee"],
+         "실현손익(원)": realized_by_id.get(t["id"]),
+         "메모": t["note"]}
+        for t in ordered
+    ])
+    edited = st.data_editor(
+        df_hist,
+        use_container_width=True,
+        hide_index=True,
+        disabled=[c for c in df_hist.columns if c != "삭제"],
+        column_config={
+            "삭제": st.column_config.CheckboxColumn(width="small"),
+            "수량": st.column_config.NumberColumn(format="%,.0f"),
+            "단가": st.column_config.NumberColumn(format="%,.2f"),
+            "환율": st.column_config.NumberColumn(format="%,.2f"),
+            "실현손익(원)": st.column_config.NumberColumn(format="%,.0f"),
+        },
+        # 매매내역이 바뀌면 키도 바뀜 → 삭제 후 체크 상태가 다른 행에 남는 사고 방지
+        key=f"hist_editor_{hash(tuple(t['id'] for t in ordered))}",
+    )
+    checked = [i for i, v in enumerate(edited["삭제"].tolist()) if v]
+    if checked:
+        if st.button(f"🗑️ 선택한 {len(checked)}건 삭제", type="secondary"):
+            ids = {ordered[i]["id"] for i in checked}
+            n = journal.delete_trades(ids)
+            st.success(f"{n}건 삭제됨")
+            st.rerun()
+    st.caption("잘못 입력한 기록은 왼쪽 체크박스로 선택해 삭제한 뒤 다시 입력하세요.")
+else:
+    st.caption("아직 기록이 없습니다.")
+
+# ─────────── 진단 ───────────
+with st.expander("🔍 진단: 저장 상태 / Gist 동기화 로그"):
+    if cloud_store.is_configured():
+        st.success("Gist 영구 저장소 연결됨 — 매매내역이 재배포 후에도 유지됩니다.")
+    else:
+        st.warning("Gist 미설정 — 로컬 파일에만 저장됩니다 (Streamlit Cloud 재배포 시 초기화).")
+    for line in cloud_store.get_sync_log():
+        st.text(line)
