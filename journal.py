@@ -122,6 +122,93 @@ def sorted_trades(trades: list[dict]) -> list[dict]:
     return sorted(trades, key=lambda t: t.get("date", ""))
 
 
+# ─────────── 액면분할(주식분할·병합) ───────────
+# 시세 데이터(FinanceDataReader = 수정주가)는 분할을 소급 반영하므로, 분할 이전에
+# 입력된 매매를 '현재 주수 기준'으로 환산해야 수량·단가가 시세와 맞는다.
+# 환산은 qty×ratio, price÷ratio 라 금액(qty×price)이 보존됨 → 원금·손익 불변.
+
+SPLITS_FILE = "splits.json"
+
+
+def load_splits() -> list[dict]:
+    data = cloud_store.load(SPLITS_FILE, [])
+    return data if isinstance(data, list) else []
+
+
+def normalize_split(raw: dict) -> dict:
+    """분할 기록 검증. ratio = 1주가 몇 주가 되었나 (분할 3:1 → 3, 병합 1:10 → 0.1)."""
+    market = str(raw.get("market", "")).upper()
+    if market not in ("KR", "US"):
+        raise ValueError("market은 KR 또는 US")
+    code = str(raw.get("code", "")).strip().upper() if market == "US" else str(raw.get("code", "")).strip()
+    if not code:
+        raise ValueError("종목코드가 비어 있음")
+    try:
+        d = str(raw.get("date", ""))
+        datetime.strptime(d, "%Y-%m-%d")
+    except ValueError:
+        raise ValueError("date는 YYYY-MM-DD 형식")
+    ratio = float(raw.get("ratio", 0))
+    if ratio <= 0:
+        raise ValueError("비율은 0보다 커야 함")
+    if abs(ratio - 1.0) < 1e-9:
+        raise ValueError("비율 1은 분할이 아님")
+    return {
+        "id": str(raw.get("id") or _new_id()),
+        "date": d,
+        "market": market,
+        "code": code,
+        "name": str(raw.get("name", "") or code).strip(),
+        "ratio": ratio,
+    }
+
+
+def add_split(raw: dict) -> dict:
+    split = normalize_split(raw)
+    cloud_store.refresh()
+    splits = load_splits()
+    for s in splits:
+        if (s.get("market"), s.get("code"), s.get("date")) == (split["market"], split["code"], split["date"]):
+            raise ValueError("같은 종목·날짜의 분할 기록이 이미 있음 (중복 반영 방지)")
+    splits.append(split)
+    cloud_store.save(SPLITS_FILE, splits)
+    return split
+
+
+def delete_splits(ids: set[str]) -> int:
+    cloud_store.refresh()
+    splits = load_splits()
+    kept = [s for s in splits if s.get("id") not in ids]
+    removed = len(splits) - len(kept)
+    if removed:
+        cloud_store.save(SPLITS_FILE, kept)
+    return removed
+
+
+def adjust_trades_for_splits(trades: list[dict], splits: list[dict]) -> list[dict]:
+    """분할일 '이전' 체결을 현재 주수 기준으로 환산한 사본을 돌려준다.
+
+    분할일 당일 이후 체결은 이미 새 기준으로 입력된 것으로 본다(증권사 앱 표기와 동일).
+    여러 번 분할된 종목은 비율을 누적 적용.
+    """
+    if not splits:
+        return list(trades)
+    by_key: dict[tuple, list[dict]] = {}
+    for s in splits:
+        by_key.setdefault((s["market"], s["code"]), []).append(s)
+    out = []
+    for t in trades:
+        factor = 1.0
+        for s in by_key.get((t["market"], t["code"]), []):
+            if t["date"] < s["date"]:
+                factor *= s["ratio"]
+        if abs(factor - 1.0) > 1e-9:
+            t = {**t, "qty": t["qty"] * factor, "price": t["price"] / factor,
+                 "split_factor": factor}
+        out.append(t)
+    return out
+
+
 # ─────────── 포지션·실현손익 (이동평균법) ───────────
 
 def compute_positions(trades: list[dict]) -> tuple[dict, list[dict], list[str]]:

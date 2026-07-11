@@ -76,11 +76,15 @@ def _color_pnl(v) -> str:
 # ─────────── 데이터 로드·계산 ───────────
 try:
     trades = journal.load_trades()
+    splits = journal.load_splits()
 except Exception as e:
     st.error(f"매매내역을 불러오지 못했습니다: {type(e).__name__}: {e}")
     st.stop()
 
-positions, realized, warnings = journal.compute_positions(trades)
+# 액면분할 반영: 분할 이전 매매를 현재 주수 기준으로 환산 (금액 보존)
+# → 시세(수정주가)와 기준이 맞아 보유현황·수익률이 증권사 앱과 일치.
+adj_trades = journal.adjust_trades_for_splits(trades, splits)
+positions, realized, warnings = journal.compute_positions(adj_trades)
 fx_now = quotes.current_usdkrw()
 
 monthly = []
@@ -93,7 +97,7 @@ if trades:
             return quotes.price_history(market, code, first_date - timedelta(days=10))
 
         try:
-            monthly = journal.compute_monthly_returns(trades, _price_fn, fx_series)
+            monthly = journal.compute_monthly_returns(adj_trades, _price_fn, fx_series)
         except Exception as e:
             st.warning(f"수익률 계산 실패 (가격 데이터 문제일 수 있음): {type(e).__name__}: {e}")
 
@@ -251,6 +255,72 @@ with st.expander("➕ 매매 입력 (매수/매도)", expanded=not trades):
         except Exception as e:
             st.error(f"저장 실패: {type(e).__name__}: {e}")
 
+# ─────────── 액면분할 기록 ───────────
+with st.expander(f"🔀 액면분할 기록 ({len(splits)}건) — 분할·병합된 종목이 있으면 등록"):
+    st.caption(
+        "예: 테슬라 2022-08-25 1주→3주, 삼성전자 2018-05-04 1주→50주. "
+        "등록하면 **분할일 이전에 입력한 매매**의 수량·단가를 현재 기준으로 자동 환산합니다 "
+        "(투자금액·손익은 그대로 보존). 분할일 이후 입력분은 이미 새 기준이므로 건드리지 않습니다. "
+        "병합(감자)은 1주→0.1주처럼 1보다 작은 값으로 입력하세요."
+    )
+    sp1, sp2, sp3 = st.columns([1, 2, 1])
+    with sp1:
+        sp_market_kor = st.radio("시장", ["🇰🇷 한국", "🇺🇸 미국"], horizontal=True, key="sp_market")
+        sp_market = "KR" if sp_market_kor.endswith("한국") else "US"
+    with sp2:
+        sp_code, sp_name = "", ""
+        if sp_market == "KR":
+            try:
+                _sd = _krx_names()
+            except Exception:
+                _sd = {}
+            if _sd:
+                _opts = [f"{n} {c}" for c, n in sorted(_sd.items(), key=lambda kv: kv[1])]
+                _sel = st.selectbox("종목", options=_opts, key="sp_kr_stock")
+                sp_code = _sel.rsplit(maxsplit=1)[-1]
+                sp_name = _sd.get(sp_code, sp_code)
+            else:
+                sp_code = st.text_input("종목코드 (6자리)", max_chars=6, key="sp_kr_code").strip()
+                sp_name = sp_code
+        else:
+            sp_code = st.text_input("티커 (예: TSLA)", key="sp_us_ticker").strip().upper()
+            sp_name = sp_code
+    with sp3:
+        sp_date = st.date_input(
+            "분할 기준일", value=journal.today_kst(),
+            min_value=datetime(2000, 1, 1).date(), max_value=journal.today_kst(),
+            key="sp_date",
+        )
+        sp_ratio = st.number_input(
+            "1주 → 몇 주?", min_value=0.0001, step=1.0, value=2.0, format="%.4f",
+            key="sp_ratio", help="분할 3:1이면 3, 50:1이면 50. 병합 1:10이면 0.1",
+        )
+    if st.button("🔀 분할 기록 저장", use_container_width=True, key="sp_save"):
+        try:
+            s = journal.add_split({
+                "market": sp_market, "code": sp_code, "name": sp_name,
+                "date": sp_date.isoformat(), "ratio": sp_ratio,
+            })
+            st.success(f"저장됨: {s['name']} {s['date']} 1주→{s['ratio']:g}주")
+            st.rerun()
+        except ValueError as e:
+            st.error(f"입력 오류: {e}")
+        except Exception as e:
+            st.error(f"저장 실패: {type(e).__name__}: {e}")
+
+    if splits:
+        st.divider()
+        for s in sorted(splits, key=lambda x: x.get("date", "")):
+            c_txt, c_del = st.columns([6, 1])
+            c_txt.markdown(
+                f"<small>{'🇰🇷' if s['market'] == 'KR' else '🇺🇸'} "
+                f"<b>{s['name']}</b> ({s['code']}) · {s['date']} · 1주→{s['ratio']:g}주</small>",
+                unsafe_allow_html=True,
+            )
+            if c_del.button("✖", key=f"sp_del_{s['id']}", help="분할 기록 삭제"):
+                journal.delete_splits({s["id"]})
+                st.rerun()
+
 # ─────────── 보유 현황 ───────────
 st.subheader("💼 보유 현황")
 if rows:
@@ -266,7 +336,11 @@ if rows:
         "비중%": "{:.1f}",
     }, na_rep="-")
     st.dataframe(styled, use_container_width=True, hide_index=True)
-    st.caption("평균단가·현재가는 매매 통화 기준(한국=원, 미국=달러). 매입금·평가액·손익은 원화 환산.")
+    _split_note = " 액면분할 기록이 반영된 수량·평단입니다." if splits else ""
+    st.caption(
+        "평균단가·현재가는 매매 통화 기준(한국=원, 미국=달러). 매입금·평가액·손익은 원화 환산."
+        + _split_note
+    )
 else:
     st.caption("보유 중인 종목이 없습니다. 위에서 매매를 입력하세요.")
 
@@ -384,7 +458,10 @@ if trades:
             n = journal.delete_trades(ids)
             st.success(f"{n}건 삭제됨")
             st.rerun()
-    st.caption("잘못 입력한 기록은 왼쪽 체크박스로 선택해 삭제한 뒤 다시 입력하세요.")
+    st.caption(
+        "잘못 입력한 기록은 왼쪽 체크박스로 선택해 삭제한 뒤 다시 입력하세요."
+        + (" 여기 표시되는 수량·단가는 입력 당시 원본이며, 액면분할 환산은 보유 현황·수익률 계산에만 적용됩니다." if splits else "")
+    )
 else:
     st.caption("아직 기록이 없습니다.")
 

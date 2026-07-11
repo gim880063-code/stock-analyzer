@@ -129,6 +129,77 @@ class PositionTests(unittest.TestCase):
         self.assertAlmostEqual(yearly["2026"], 150.0)
 
 
+def _split(d, market, code, ratio):
+    return {"id": f"s-{d}-{code}", "date": d, "market": market, "code": code,
+            "name": code, "ratio": float(ratio)}
+
+
+class SplitTests(unittest.TestCase):
+    def test_adjusts_only_trades_before_split(self):
+        trades = [
+            _t("2022-01-10", "US", "TSLA", "buy", 10, 900),   # 분할 전
+            _t("2022-08-25", "US", "TSLA", "buy", 3, 300),    # 분할 당일 (새 기준)
+            _t("2023-01-10", "US", "TSLA", "buy", 5, 200),    # 분할 후
+        ]
+        adj = journal.adjust_trades_for_splits(trades, [_split("2022-08-25", "US", "TSLA", 3)])
+        self.assertAlmostEqual(adj[0]["qty"], 30.0)
+        self.assertAlmostEqual(adj[0]["price"], 300.0)
+        self.assertAlmostEqual(adj[1]["qty"], 3.0)     # 당일 이후는 그대로
+        self.assertAlmostEqual(adj[2]["price"], 200.0)
+        # 금액 보존: 환산 전후 qty×price 동일
+        self.assertAlmostEqual(adj[0]["qty"] * adj[0]["price"], 9000.0)
+
+    def test_multiple_splits_compound(self):
+        trades = [_t("2019-01-10", "US", "TSLA", "buy", 1, 1500)]
+        splits = [
+            _split("2020-08-31", "US", "TSLA", 5),
+            _split("2022-08-25", "US", "TSLA", 3),
+        ]
+        adj = journal.adjust_trades_for_splits(trades, splits)
+        self.assertAlmostEqual(adj[0]["qty"], 15.0)
+        self.assertAlmostEqual(adj[0]["price"], 100.0)
+
+    def test_merge_ratio_below_one(self):
+        trades = [_t("2024-01-10", "KR", "000001", "buy", 100, 1000)]
+        adj = journal.adjust_trades_for_splits(trades, [_split("2024-06-01", "KR", "000001", 0.1)])
+        self.assertAlmostEqual(adj[0]["qty"], 10.0)
+        self.assertAlmostEqual(adj[0]["price"], 10000.0)
+
+    def test_positions_and_realized_after_split(self):
+        # 분할 전 10주@900 매수 → 3:1 분할 → 30주@300 기준으로 15주@350 매도
+        trades = [
+            _t("2022-01-10", "US", "TSLA", "buy", 10, 900, fx=1300),
+            _t("2022-09-10", "US", "TSLA", "sell", 15, 350, fx=1300),
+        ]
+        adj = journal.adjust_trades_for_splits(trades, [_split("2022-08-25", "US", "TSLA", 3)])
+        pos, realized, warnings = journal.compute_positions(adj)
+        self.assertEqual(warnings, [])  # 분할 환산 덕에 '보유량 초과 매도' 아님
+        self.assertAlmostEqual(pos[("US", "TSLA")]["qty"], 15.0)
+        self.assertAlmostEqual(pos[("US", "TSLA")]["avg_local"], 300.0)
+        self.assertAlmostEqual(realized[0]["pnl_local"], 15 * (350 - 300))
+
+    def test_equity_money_preserved_across_split(self):
+        # 수정주가 시세(현재 기준)와 환산 수량이 일치해 분할 전 시점 평가액도 정확
+        trades = [_t("2026-01-05", "KR", "005930", "buy", 10, 900)]
+        adj = journal.adjust_trades_for_splits(trades, [_split("2026-02-15", "KR", "005930", 3)])
+        px = pd.Series([300.0, 330.0], index=pd.to_datetime(["2026-01-05", "2026-02-28"]))
+        monthly = journal.compute_monthly_returns(adj, lambda m, c: px, None, today=date(2026, 2, 28))
+        self.assertAlmostEqual(monthly[0]["end_equity"], 9000.0)   # 1월말: 30주×300 = 투자금 그대로
+        self.assertAlmostEqual(monthly[1]["ret"], 0.10, places=6)  # 2월: +10%
+
+    def test_split_crud_and_duplicate_guard(self):
+        fake = FakeStore()
+        with patch.object(journal, "cloud_store", fake):
+            s = journal.add_split({"market": "US", "code": "tsla", "date": "2022-08-25", "ratio": 3})
+            self.assertEqual(s["code"], "TSLA")
+            with self.assertRaises(ValueError):
+                journal.add_split({"market": "US", "code": "TSLA", "date": "2022-08-25", "ratio": 3})
+            with self.assertRaises(ValueError):
+                journal.normalize_split({"market": "US", "code": "TSLA", "date": "2022-08-25", "ratio": 1})
+            self.assertEqual(journal.delete_splits({s["id"]}), 1)
+            self.assertEqual(journal.load_splits(), [])
+
+
 def _kr_series():
     return pd.Series(
         [10000.0, 11000.0, 12100.0],
