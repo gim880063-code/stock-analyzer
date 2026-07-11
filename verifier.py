@@ -51,6 +51,58 @@ DEFAULT_MIN_HOLD_DAYS = 5
 # (점수가 -1/0/+1 같은 거친 정수라, 표본이 적으면 상관계수가 크게 요동침).
 IC_MIN_OBS = 30
 
+# ─────────── "그 시점에 샀다면" 금액 요약 ───────────
+# 사용자의 실제 판단 기준: "스크리닝에서 나온 주식을 그 시점에 샀으면 수익이
+# 나는가". IC·분위 통계가 아니라 돈 단위로 답한다. 실제 매수 대상이 되는
+# 통과(picked)+적응(adaptive)만 포함 — 관찰(observed)은 추천이 아니므로 제외.
+MONEY_PER_STOCK = 1_000_000  # 종목당 가정 매수금 (표시용 — 비율이라 금액 무관)
+
+
+def money_summary(
+    horizon: str = "all",
+    min_hold_days: int = 0,
+    per_stock: int = MONEY_PER_STOCK,
+    kinds: tuple = ("picked", "adaptive"),
+) -> dict | None:
+    """통과 종목을 발굴 시점마다 per_stock 원씩 샀다면의 결과.
+
+    반환: {"n", "invested", "hold_value", "trail_value", "market_value",
+           "wins", "horizon"} — 수익률 데이터가 하나도 없으면 None.
+    trail_value 는 고점 대비 트레일링 스톱을 지켰을 때(없으면 보유와 동일),
+    market_value 는 같은 돈을 각 발굴일에 시장 지수에 넣었을 때.
+    """
+    rows: list[dict] = []
+    for k in kinds:
+        try:
+            r = verify_scouted(horizon=horizon, min_hold_days=min_hold_days, kind=k)
+            rows.extend(x for x in r.get("rows", []) if x.get("return_pct") is not None)
+        except Exception:
+            continue
+    if not rows:
+        return None
+    n = len(rows)
+    invested = n * per_stock
+    hold = 0.0
+    trail = 0.0
+    market = 0.0
+    wins = 0
+    for x in rows:
+        ret = float(x["return_pct"])
+        hold += (1 + ret / 100) * per_stock
+        t = x.get("trail_return_pct")
+        trail += (1 + (float(t) if t is not None else ret) / 100) * per_stock
+        ex = x.get("excess_return_pct")
+        # 시장 수익률 = 종목 수익률 − 초과수익. 초과 데이터 없으면 중립(원금) 처리.
+        market += (1 + (ret - float(ex)) / 100) * per_stock if ex is not None else per_stock
+        if ret > 0:
+            wins += 1
+    return {
+        "n": n, "invested": invested,
+        "hold_value": round(hold), "trail_value": round(trail),
+        "market_value": round(market), "wins": wins, "horizon": horizon,
+    }
+
+
 # ─────────── 적응 통과 확대 — 사전 등록 규칙 ───────────
 # 2026-06 과열장 대응 때 "적응 트랙이 실제 수익으로 검증되면 게이트 확대"로
 # 미뤄둔 단계. 사람이 눈짐작으로 켜는 게 아니라, 아래 기준을 코드가 축적 데이터로

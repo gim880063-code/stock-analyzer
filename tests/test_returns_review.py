@@ -218,6 +218,39 @@ class ExpansionStateTests(unittest.TestCase):
         self.assertFalse(s["expand"])
 
 
+class MoneySummaryTests(unittest.TestCase):
+    def test_money_math(self):
+        rows_by_kind = {
+            "picked": [
+                {"return_pct": 10.0, "trail_return_pct": 5.0, "excess_return_pct": 8.0},
+                {"return_pct": -20.0, "trail_return_pct": -10.0, "excess_return_pct": -22.0},
+            ],
+            "adaptive": [
+                {"return_pct": 4.0, "trail_return_pct": None, "excess_return_pct": None},
+            ],
+        }
+
+        def fake_verify(score_type="total", horizon="all", min_hold_days=5, kind="picked"):
+            return {"rows": rows_by_kind.get(kind, []), "total_count": len(rows_by_kind.get(kind, []))}
+
+        with patch.object(verifier, "verify_scouted", fake_verify):
+            m = verifier.money_summary(horizon="all", per_stock=1_000_000)
+        self.assertEqual(m["n"], 3)  # 관찰(observed)은 아예 조회 안 함
+        self.assertEqual(m["invested"], 3_000_000)
+        # 보유: 1.10 + 0.80 + 1.04 = 2.94백만
+        self.assertEqual(m["hold_value"], 2_940_000)
+        # 손절: 1.05 + 0.90 + (trail 없음→보유 1.04) = 2.99백만
+        self.assertEqual(m["trail_value"], 2_990_000)
+        # 시장: (10-8=2%) 1.02 + (-20+22=2%) 1.02 + (초과 없음→원금 1.00) = 3.04백만
+        self.assertEqual(m["market_value"], 3_040_000)
+        self.assertEqual(m["wins"], 2)
+
+    def test_none_when_no_rows(self):
+        with patch.object(verifier, "verify_scouted",
+                          lambda **k: {"rows": [], "total_count": 0}):
+            self.assertIsNone(verifier.money_summary())
+
+
 class FocusGateTests(unittest.TestCase):
     def test_focus_subscore_weighted(self):
         r = {"scores": [

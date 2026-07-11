@@ -3067,6 +3067,43 @@ if st.session_state.get("_view_mode") == "verifier":
         _lvl, _msg = _verdict_scout(result)
         _emit_verdict(_lvl, _msg)
 
+        # 💰 "그 시점에 샀다면" — 사용자의 실제 판단 기준을 돈 단위로 먼저 보여준다.
+        # 실제 매수 대상인 통과(발굴+적응)만 포함, 관찰(추천 아님)은 제외.
+        try:
+            _ms = verifier.money_summary(horizon=horizon, min_hold_days=min_hold_days)
+        except Exception:
+            _ms = None
+        if _ms:
+            _hl2 = {"5d": "5영업일 보유", "20d": "20영업일 보유", "60d": "60영업일 보유", "all": "발굴일~현재"}
+            st.markdown(f"##### 💰 통과 종목을 그 시점에 샀다면 ({_hl2.get(_ms['horizon'], _ms['horizon'])} 기준)")
+            _inv = _ms["invested"]
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric(
+                "투입 (가정)", f"{_inv / 10_000:,.0f}만원",
+                f"{_ms['n']}종목 × 100만원", delta_color="off",
+                help="발굴 통과(발굴+적응) 종목마다 발굴일 종가에 100만원씩 샀다고 가정. 관찰은 제외.",
+            )
+            m2.metric(
+                "그냥 보유", f"{_ms['hold_value'] / 10_000:,.0f}만원",
+                f"{(_ms['hold_value'] / _inv - 1) * 100:+.1f}% · 승 {_ms['wins']}/{_ms['n']}",
+                help="사서 끝까지(또는 선택한 기간까지) 들고 있었을 때.",
+            )
+            m3.metric(
+                "손절 규칙 적용", f"{_ms['trail_value'] / 10_000:,.0f}만원",
+                f"{(_ms['trail_value'] / _inv - 1) * 100:+.1f}%",
+                help="보유 점검의 트레일링 스톱(고점 대비 하락 시 청산)을 지켰을 때.",
+            )
+            m4.metric(
+                "같은 돈을 시장에", f"{_ms['market_value'] / 10_000:,.0f}만원",
+                f"{(_ms['market_value'] / _inv - 1) * 100:+.1f}%",
+                help="각 발굴일에 같은 금액을 KOSPI/KOSDAQ 지수에 넣었다면. 이것보다 나아야 의미가 있음.",
+            )
+            st.caption(
+                "이 네 숫자가 핵심입니다 — '손절 규칙 적용'이 '같은 돈을 시장에'보다 크면 "
+                "스크리닝+청산 규율 조합이 시장을 이긴 것."
+            )
+            st.divider()
+
         if result["total_count"] == 0:
             short_hold = result.get("excluded_short_hold", 0)
             missing = result.get("missing_data_count", 0)
