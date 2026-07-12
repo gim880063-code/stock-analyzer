@@ -117,6 +117,73 @@ def delete_trades(ids: set[str]) -> int:
     return removed
 
 
+# ─────────── 일괄 등록 (증권사 내역 가져오기) ───────────
+# 증권사 엑셀 내역을 파싱해 수백 건을 한 번에 넣을 때 사용. 저장은 1회만 하고
+# (건별 Gist PATCH 남발 방지), 이미 있는 것과 같은 체결은 건너뛴다.
+
+def _trade_dupkey(t: dict) -> tuple:
+    """중복 판정 키 — 같은 날·종목·방향·수량·단가면 같은 체결로 본다."""
+    return (
+        t.get("date"), t.get("market"), t.get("code"), t.get("side"),
+        round(float(t.get("qty", 0)), 6), round(float(t.get("price", 0)), 4),
+    )
+
+
+def bulk_add_trades(raws: list[dict]) -> tuple[int, int, list[str]]:
+    """매매 여러 건을 검증 후 한 번에 저장. (추가, 중복 건너뜀, 오류메시지들) 반환."""
+    cloud_store.refresh()
+    trades = load_trades()
+    existing = {_trade_dupkey(t) for t in trades}
+    added, skipped, errors = 0, 0, []
+    for i, raw in enumerate(raws):
+        try:
+            t = normalize_trade(raw)
+        except ValueError as e:
+            errors.append(f"{i + 1}번째: {e}")
+            continue
+        key = _trade_dupkey(t)
+        if key in existing:
+            skipped += 1
+            continue
+        existing.add(key)
+        trades.append(t)
+        added += 1
+    if added:
+        cloud_store.save(TRADES_FILE, trades)
+    return added, skipped, errors
+
+
+def _income_dupkey(e: dict) -> tuple:
+    return (
+        e.get("date"), e.get("type"), e.get("market"), e.get("code"),
+        e.get("name"), round(float(e.get("amount", 0)), 4),
+    )
+
+
+def bulk_add_incomes(raws: list[dict]) -> tuple[int, int, list[str]]:
+    """배당·세금 여러 건을 검증 후 한 번에 저장. (추가, 중복, 오류들) 반환."""
+    cloud_store.refresh()
+    incomes = load_incomes()
+    existing = {_income_dupkey(e) for e in incomes}
+    added, skipped, errors = 0, 0, []
+    for i, raw in enumerate(raws):
+        try:
+            e = normalize_income(raw)
+        except ValueError as ex:
+            errors.append(f"{i + 1}번째: {ex}")
+            continue
+        key = _income_dupkey(e)
+        if key in existing:
+            skipped += 1
+            continue
+        existing.add(key)
+        incomes.append(e)
+        added += 1
+    if added:
+        cloud_store.save(INCOMES_FILE, incomes)
+    return added, skipped, errors
+
+
 def sorted_trades(trades: list[dict]) -> list[dict]:
     """날짜순 정렬. 같은 날짜는 입력 순서 유지(안정 정렬)."""
     return sorted(trades, key=lambda t: t.get("date", ""))

@@ -457,6 +457,42 @@ class CrudTests(unittest.TestCase):
             self.assertEqual(len(remaining), 1)
             self.assertEqual(remaining[0]["id"], t2["id"])
 
+    def test_bulk_add_trades_dedup_and_errors(self):
+        fake = FakeStore()
+        with patch.object(journal, "cloud_store", fake):
+            journal.add_trade({"date": "2023-10-04", "market": "US", "code": "TQQQ",
+                               "side": "buy", "qty": 43, "price": 17.74, "fx": 1351.3})
+            raws = [
+                # 이미 있는 체결 (중복 → 건너뜀)
+                {"date": "2023-10-04", "market": "US", "code": "TQQQ",
+                 "side": "buy", "qty": 43, "price": 17.74, "fx": 1354.0},
+                # 새 체결
+                {"date": "2023-10-04", "market": "US", "code": "TQQQ",
+                 "side": "buy", "qty": 42, "price": 17.54, "fx": 1351.3},
+                # 잘못된 입력 (오류 수집, 나머지는 계속)
+                {"date": "2023-10-04", "market": "US", "code": "",
+                 "side": "buy", "qty": 1, "price": 1, "fx": 1351.3},
+            ]
+            added, skipped, errors = journal.bulk_add_trades(raws)
+            self.assertEqual((added, skipped, len(errors)), (1, 1, 1))
+            self.assertEqual(len(journal.load_trades()), 2)
+
+    def test_bulk_add_incomes_dedup(self):
+        fake = FakeStore()
+        with patch.object(journal, "cloud_store", fake):
+            raws = [
+                {"type": "dividend", "date": "2023-10-04", "market": "US",
+                 "code": "TQQQ", "name": "TQQQ", "amount": 36.19, "fx": 1351.3},
+                {"type": "expense", "date": "2023-10-04", "market": "US",
+                 "code": "TQQQ", "name": "세금출금(해외)", "amount": 5.43,
+                 "currency": "USD", "fx": 1351.3},
+            ]
+            added, skipped, errors = journal.bulk_add_incomes(raws)
+            self.assertEqual((added, skipped, errors), (2, 0, []))
+            added2, skipped2, _ = journal.bulk_add_incomes(raws)  # 재실행 → 전부 중복
+            self.assertEqual((added2, skipped2), (0, 2))
+            self.assertEqual(len(journal.load_incomes()), 2)
+
     def test_bad_stored_data_returns_empty(self):
         fake = FakeStore()
         fake.data[journal.TRADES_FILE] = {"corrupted": True}
