@@ -185,8 +185,13 @@ def bulk_add_incomes(raws: list[dict]) -> tuple[int, int, list[str]]:
 
 
 def sorted_trades(trades: list[dict]) -> list[dict]:
-    """날짜순 정렬. 같은 날짜는 입력 순서 유지(안정 정렬)."""
-    return sorted(trades, key=lambda t: t.get("date", ""))
+    """날짜순 정렬 — 같은 날짜 안에서는 매수를 매도보다 먼저 처리.
+
+    증권사 원장은 당일 왕복 거래(당일 매수분을 당일 매도)를 시간 순서와 다르게
+    기록하기도 해서(실사례: 잔고수량이 음수로 갔다가 0), 매도를 먼저 만나면
+    '보유량 초과 매도'로 오해한다. 같은 날은 매수 먼저 반영해 당일 순매매로 계산.
+    """
+    return sorted(trades, key=lambda t: (t.get("date", ""), 0 if t.get("side") == "buy" else 1))
 
 
 # ─────────── 액면분할(주식분할·병합) ───────────

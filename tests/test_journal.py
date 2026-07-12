@@ -148,6 +148,21 @@ class PositionTests(unittest.TestCase):
         self.assertAlmostEqual(s.iloc[3], -30.0)
         self.assertAlmostEqual(s.cumsum().iloc[-1], 70.0)
 
+    def test_same_day_buy_processed_before_sell(self):
+        # 실사례(삼성SDI 2026-05-13): 원장이 매도(4+10) 뒤에 당일 매수(6)를 기록해
+        # 잔고가 음수로 보이던 건 — 같은 날은 매수 먼저 처리해 당일 왕복을 상쇄.
+        trades = [
+            _t("2026-05-11", "KR", "006400", "buy", 4, 693000),
+            _t("2026-05-12", "KR", "006400", "buy", 4, 678000),
+            _t("2026-05-13", "KR", "006400", "sell", 4, 681000),   # 원장 순서: 매도 먼저
+            _t("2026-05-13", "KR", "006400", "sell", 10, 681000),
+            _t("2026-05-13", "KR", "006400", "buy", 6, 658000),    # 당일 매수가 뒤에 기록됨
+        ]
+        pos, realized, warnings = journal.compute_positions(trades)
+        self.assertEqual(warnings, [])                    # 초과 매도 아님
+        self.assertNotIn(("KR", "006400"), pos)           # 당일 정리 후 잔고 0
+        self.assertAlmostEqual(sum(r["qty"] for r in realized), 14.0)
+
     def test_realized_by_period(self):
         realized = [
             {"date": "2025-12-10", "pnl_krw": 100.0},
