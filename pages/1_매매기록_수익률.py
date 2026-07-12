@@ -59,9 +59,25 @@ st.caption(
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def _krx_names() -> dict[str, str]:
-    """KRX 전 종목 이름맵 (코드→이름). 실패 시 예외 → 캐시 안 됨 → 다음에 재시도."""
+    """KRX 주식 + ETF 이름맵 (코드→이름). 실패 시 예외 → 캐시 안 됨 → 다음에 재시도.
+
+    매매·배당 기록은 ETF(KODEX·TIGER 등)도 대상인데 주식 목록엔 없어서 병합.
+    (메인 분석 화면은 재무제표 기반이라 주식 전용 — 여기만 확장)
+    """
     from analyzer import all_korean_stocks
-    return all_korean_stocks()
+    names = dict(all_korean_stocks())
+    try:
+        import FinanceDataReader as fdr
+        etf = fdr.StockListing("ETF/KR")
+        sym_col = "Symbol" if "Symbol" in etf.columns else etf.columns[0]
+        name_col = "Name" if "Name" in etf.columns else etf.columns[1]
+        for _, r in etf.iterrows():
+            code, name = str(r[sym_col]).strip(), str(r[name_col]).strip()
+            if code and name:
+                names[code] = name
+    except Exception:
+        pass  # ETF 목록 실패해도 주식 검색은 그대로 동작
+    return names
 
 
 GREEN, RED = "#1f7a3a", "#a3201a"
