@@ -53,16 +53,58 @@ def price_history(market: str, code: str, start: date) -> pd.Series | None:
     return _cached_fetch(("px", market, code, start.isoformat()), fetch)
 
 
-def usdkrw_history(start: date) -> pd.Series | None:
-    """start 이후 원/달러 일별 환율 시리즈 (서울 날짜 기준). 실패 시 None.
+_NAVER_FX_URL = "https://m.stock.naver.com/front-api/marketIndex/prices"
+_NAVER_FX_HEADERS = {"User-Agent": "Mozilla/5.0"}
 
-    글로벌 FX 일봉은 뉴욕 기준이라 일~목요일에 라벨이 찍히고, 라벨 D 봉이
-    실제로는 서울 D+1 거래일의 환율이다. 하루 밀어 서울 날짜(월~금)에 맞춘다.
-    검증: 서울 2023-06-29 고시 ≈1,310원 = 원본 6/28 봉 1,309.01 /
-          서울 2023-07-14 ≈1,268원 = 원본 7/13 봉 1,266.83.
+
+def _naver_usdkrw_history(start: date) -> pd.Series | None:
+    """네이버 서울 고시환율(하나은행 매매기준율) 일별 이력. 실패 시 None.
+
+    글로벌 FX 소스와 달리 한국 휴장일이 정확히 반영된다 — 2023-10-04(추석 연휴
+    직후) 삼성증권 적용 1,351.3원 vs 서울 기준율 1,354.0(2.7원 차) vs 글로벌
+    1,359.2(7.9원 차) 사례에서 교체 결정. 증권사 적용 환율(최초고시±스프레드)과
+    같은 계열이라 사용자 거래내역과 가장 가깝다.
+    """
+    import requests
+
+    rows: dict[str, float] = {}
+    start_key = start.isoformat()
+    try:
+        for page in range(1, 201):  # 60건/페이지 — 200페이지 ≈ 48년치 상한
+            r = requests.get(
+                _NAVER_FX_URL,
+                params={"category": "exchange", "reutersCode": "FX_USDKRW",
+                        "page": page, "pageSize": 60},
+                headers=_NAVER_FX_HEADERS, timeout=15,
+            )
+            items = (r.json().get("result") or []) if r.ok else []
+            if not items:
+                break
+            for it in items:
+                rows[it["localTradedAt"]] = float(str(it["closePrice"]).replace(",", ""))
+            if items[-1]["localTradedAt"] < start_key:
+                break
+        rows = {d: v for d, v in rows.items() if d >= start_key}
+        if not rows:
+            return None
+        s = pd.Series(rows)
+        s.index = pd.to_datetime(s.index)
+        return s.sort_index()
+    except Exception:
+        return None
+
+
+def usdkrw_history(start: date) -> pd.Series | None:
+    """start 이후 원/달러 일별 환율 시리즈 (서울 고시환율 기준). 실패 시 None.
+
+    1순위: 네이버 서울 매매기준율 (한국 휴장일 정확, 증권사 기준과 동일 계열).
+    폴백: 글로벌 FX 일봉(fdr) — 뉴욕 기준이라 일~목 라벨이 서울 D+1 환율이라
+    하루 밀어 서울 날짜에 맞춘다 (연휴 구간엔 수 원 오차 가능).
     """
     def fetch():
-        # 하루 시프트 후에도 start 시점 값이 있도록 며칠 앞서 조회
+        s = _naver_usdkrw_history(start - timedelta(days=4))
+        if s is not None and len(s) > 0:
+            return s
         df = fdr.DataReader("USD/KRW", (start - timedelta(days=4)).isoformat())
         s = df["Close"].dropna()
         s.index = s.index + pd.Timedelta(days=1)

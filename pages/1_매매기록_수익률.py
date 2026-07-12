@@ -168,7 +168,7 @@ c4.metric(
 )
 c5.metric("환율 USD/KRW", f"{fx_now:,.2f}원" if fx_now else "조회 실패")
 st.caption(
-    "가격은 최근 종가 기준(실시간 아님). 미국 주식 평가는 현재 시장환율로 환산합니다 — "
+    "가격은 최근 종가 기준(실시간 아님). 미국 주식 평가는 서울 고시환율(매매기준율)로 환산합니다 — "
     "증권사(삼성증권) 앱의 평가금액과는 고시환율·스프레드 차이로 소폭 다를 수 있습니다. "
     "매매 자체는 입력한 체결 환율로 계산되므로 실현손익은 계좌와 일치합니다."
 )
@@ -230,7 +230,7 @@ with st.expander("➕ 매매 입력 (매수/매도)", expanded=not trades):
             fx_default = quotes.usdkrw_at(trade_date) or fx_now or 1300.0
             # key 에 날짜를 넣어 체결일을 바꾸면 그 날짜의 환율이 새로 채워지게 함
             fx = st.number_input(
-                "체결 환율 (원/달러) — 시장환율 자동 조회, 수정 가능",
+                "체결 환율 (원/달러) — 서울 고시환율 자동, 수정 가능",
                 min_value=0.0, step=0.1, value=float(fx_default), format="%.2f",
                 key=f"in_fx_{gen}_{trade_date.isoformat()}",
             )
@@ -350,7 +350,7 @@ with st.expander(f"💵 배당금·세금·기타 입력 ({len(incomes)}건)"):
             if inc_market == "US":
                 _fx_def = quotes.usdkrw_at(inc_date) or fx_now or 1300.0
                 inc_fx = st.number_input(
-                    "환율 (원/달러) — 자동 조회, 수정 가능",
+                    "환율 (원/달러) — 서울 고시환율 자동, 수정 가능",
                     min_value=0.0, step=0.1, value=float(_fx_def), format="%.2f",
                     key=f"inc_fx_{igen}_{inc_date.isoformat()}",
                 )
@@ -399,7 +399,7 @@ with st.expander(f"💵 배당금·세금·기타 입력 ({len(incomes)}건)"):
             if inc_currency == "USD":
                 _fx_def2 = quotes.usdkrw_at(inc_date) or fx_now or 1300.0
                 inc_fx = st.number_input(
-                    "환율 (원/달러) — 자동 조회, 수정 가능",
+                    "환율 (원/달러) — 서울 고시환율 자동, 수정 가능",
                     min_value=0.0, step=0.1, value=float(_fx_def2), format="%.2f",
                     key=f"inc_fx2_{igen}_{inc_date.isoformat()}",
                 )
