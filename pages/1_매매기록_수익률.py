@@ -833,6 +833,33 @@ st.subheader(f"📋 매매내역 ({len(trades)}건)")
 if trades:
     realized_by_id = {r["trade_id"]: r["pnl_krw"] for r in realized}
     ordered = list(reversed(journal.sorted_trades(trades)))  # 최신이 위로
+
+    # 종목 필터 — 종목을 고르면 그 종목 매매만 + 요약(매수·매도 합계, 실현손익)
+    _sym_names: dict[tuple, str] = {}
+    for t in journal.sorted_trades(trades):
+        _sym_names[(t["market"], t["code"])] = t.get("name") or t["code"]
+    _sym_labels = {
+        f"{'🇰🇷' if m == 'KR' else '🇺🇸'} {n} ({c})": (m, c)
+        for (m, c), n in sorted(_sym_names.items(), key=lambda kv: (kv[0][0], kv[1]))
+    }
+    _sel_sym = st.selectbox(
+        "종목 필터", ["전체 보기"] + list(_sym_labels.keys()),
+        key="hist_sym_filter",
+        help="종목을 고르면 그 종목의 매매만 보이고, 매수·매도 합계와 실현손익 요약이 표시됩니다.",
+    )
+    if _sel_sym != "전체 보기":
+        _mk, _cd = _sym_labels[_sel_sym]
+        ordered = [t for t in ordered if (t["market"], t["code"]) == (_mk, _cd)]
+        _buys = [t for t in ordered if t["side"] == "buy"]
+        _sells = [t for t in ordered if t["side"] == "sell"]
+        _rsum = sum(r["pnl_krw"] for r in realized if (r["market"], r["code"]) == (_mk, _cd))
+        st.caption(
+            f"**{_sel_sym}** — 매매 {len(ordered)}건 · "
+            f"매수 {len(_buys)}건 {sum(t['qty'] for t in _buys):,.0f}주 · "
+            f"매도 {len(_sells)}건 {sum(t['qty'] for t in _sells):,.0f}주 · "
+            f"실현손익 {_rsum:+,.0f}원"
+        )
+
     df_hist = pd.DataFrame([
         {"삭제": False,
          "날짜": t["date"],
