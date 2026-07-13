@@ -7,3 +7,19 @@ python-dotenv==1.2.2
 google-genai==2.0.1
 beautifulsoup4==4.14.3
 lxml==6.1.0
+
+# ── 간접 의존성(자동 설치되는 부품) 고정 ──
+# 2026-07-12 배포부터 Segmentation fault 로 앱이 통째로 죽는 문제 대응:
+# 마지막 정상 배포(6/23) 이후 새로 나온 네이티브(C/C++) 빌드들을 당시 검증된
+# 버전으로 되돌림. 유력 용의자는 pyarrow 25 (7/10 출시, Streamlit 이 표를
+# 그릴 때마다 사용) — 로그상 표 렌더 직후 segfault. 원인 확정 전까지 유지.
+pyarrow==24.0.0
+numpy==2.5.0
+pillow==12.2.0
+cffi==2.0.0
+websockets==16.0
+charset-normalizer==3.4.7
+rpds-py==2026.5.1
+pydeck==0.9.2
+narwhals==2.22.1
+plotly==6.8.0

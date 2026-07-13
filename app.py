@@ -1,6 +1,11 @@
 """
 주식 분석 리포트 - Streamlit 웹 앱
 """
+# 세그폴트(네이티브 크래시)가 나면 어디서 죽었는지 로그에 남긴다 —
+# 2026-07-12 배포가 Segmentation fault 로 죽었을 때 위치를 못 찾아 고생한 뒤 추가.
+import faulthandler
+faulthandler.enable()
+
 import json
 import threading
 import time
