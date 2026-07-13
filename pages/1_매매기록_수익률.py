@@ -3,6 +3,11 @@
 app.py 와 독립된 새 페이지: 여기서 크래시가 나도 메인 분석 화면은 영향 없다.
 데이터는 Gist(trades.json)에 저장되어 재배포 후에도 계속 누적된다.
 """
+# 세그폴트(네이티브 크래시) 시 죽은 위치를 로그에 남긴다.
+# 이 페이지는 직접 접속 시 app.py 를 거치지 않으므로 여기서도 켜야 한다.
+import faulthandler
+faulthandler.enable()
+
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path

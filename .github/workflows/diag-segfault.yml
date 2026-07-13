@@ -1,0 +1,59 @@
+# 배포 Segmentation fault 진단 — Streamlit Cloud 와 같은 리눅스에서
+# 의심 경로를 단계별로 실행해 어느 단계에서 죽는지 기록한다.
+# 결과는 diag-out-pyXXX 브랜치에 텍스트 파일로 푸시된다. 원인 확정 후 삭제 예정.
+name: diag-segfault
+
+on:
+  push:
+    paths:
+      - ".github/workflows/diag-segfault.yml"
+      - "scripts/diag_segfault.py"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Run stages
+        run: |
+          PYV=$(echo "${{ matrix.python }}" | tr -d .)
+          OUT=diag-results-py$PYV.txt
+          uname -a > $OUT
+          python -VV >> $OUT
+          pip freeze | grep -Ei "pyarrow|numpy|lxml|pandas|pillow|protobuf|streamlit|websockets|cffi|charset" >> $OUT
+          for stage in imports krx etf fx price journal page main parallel; do
+            echo "" >> $OUT
+            echo "===== [$stage] =====" >> $OUT
+            code=0
+            timeout 600 python scripts/diag_segfault.py $stage >> $OUT 2>&1 || code=$?
+            echo "--- exit=$code (0=정상, 139=SEGFAULT, 134=abort, 124=timeout)" >> $OUT
+          done
+          echo "ALL_STAGES_DONE" >> $OUT
+
+      - name: Push results
+        if: always()
+        run: |
+          PYV=$(echo "${{ matrix.python }}" | tr -d .)
+          git config user.name "diag-bot"
+          git config user.email "diag@localhost"
+          git checkout --orphan diag-out-py$PYV
+          git rm -rf --cached . >/dev/null 2>&1 || true
+          git add -f diag-results-py$PYV.txt
+          git commit -m "diag results py${{ matrix.python }}"
+          git push -f origin HEAD:diag-out-py$PYV
