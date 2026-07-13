@@ -1,0 +1,101 @@
+Linux runnervm5mmn9 6.17.0-1018-azure #18~24.04.1-Ubuntu SMP Thu May 28 16:39:11 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
+Python 3.12.13 (main, Jun 16 2026, 22:05:08) [GCC 13.3.0]
+cffi==2.0.0
+charset-normalizer==3.4.7
+lxml==6.1.0
+numpy==2.5.0
+pandas==2.3.3
+pillow==12.2.0
+protobuf==7.35.1
+pyarrow==24.0.0
+streamlit==1.56.0
+streamlit-autorefresh==1.0.1
+websockets==16.0
+
+===== [imports] =====
+모든 모듈 임포트 OK
+[imports] 정상 종료
+--- exit=0 (0=정상, 139=SEGFAULT, 134=abort, 124=timeout)
+
+===== [krx] =====
+KRX 종목 2873개
+[krx] 정상 종료
+--- exit=0 (0=정상, 139=SEGFAULT, 134=abort, 124=timeout)
+
+===== [etf] =====
+ETF 1141개, cols=['Symbol', 'Category', 'Name', 'Price', 'RiseFall', 'Change']
+병합 루프 1141개 OK
+[etf] 정상 종료
+--- exit=0 (0=정상, 139=SEGFAULT, 134=abort, 124=timeout)
+
+===== [fx] =====
+환율 이력 72건, 현재 1502.8
+[fx] 정상 종료
+--- exit=0 (0=정상, 139=SEGFAULT, 134=abort, 124=timeout)
+
+===== [price] =====
+005930: 70건
+AAPL: 69건
+[price] 정상 종료
+--- exit=0 (0=정상, 139=SEGFAULT, 134=abort, 124=timeout)
+
+===== [journal] =====
+positions=3 realized=1 warns=0
+monthly=3 OK
+[journal] 정상 종료
+--- exit=0 (0=정상, 139=SEGFAULT, 134=abort, 124=timeout)
+
+===== [page] =====
+2026-07-13 06:36:47.119 WARNING streamlit.runtime.scriptrunner_utils.script_run_context: Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-07-13 06:36:53.532 Please replace `use_container_width` with `width`.
+
+`use_container_width` will be removed after 2025-12-31.
+
+For `use_container_width=True`, use `width='stretch'`. For `use_container_width=False`, use `width='content'`.
+2026-07-13 06:36:53.546 Please replace `use_container_width` with `width`.
+
+`use_container_width` will be removed after 2025-12-31.
+
+For `use_container_width=True`, use `width='stretch'`. For `use_container_width=False`, use `width='content'`.
+2026-07-13 06:36:53.892 Please replace `use_container_width` with `width`.
+
+`use_container_width` will be removed after 2025-12-31.
+
+For `use_container_width=True`, use `width='stretch'`. For `use_container_width=False`, use `width='content'`.
+2026-07-13 06:36:53.898 Please replace `use_container_width` with `width`.
+
+`use_container_width` will be removed after 2025-12-31.
+
+For `use_container_width=True`, use `width='stretch'`. For `use_container_width=False`, use `width='content'`.
+2026-07-13 06:36:53.904 Please replace `use_container_width` with `width`.
+
+`use_container_width` will be removed after 2025-12-31.
+
+For `use_container_width=True`, use `width='stretch'`. For `use_container_width=False`, use `width='content'`.
+2026-07-13 06:36:53.980 Please replace `use_container_width` with `width`.
+
+`use_container_width` will be removed after 2025-12-31.
+
+For `use_container_width=True`, use `width='stretch'`. For `use_container_width=False`, use `width='content'`.
+2026-07-13 06:36:53.986 Please replace `use_container_width` with `width`.
+
+`use_container_width` will be removed after 2025-12-31.
+
+For `use_container_width=True`, use `width='stretch'`. For `use_container_width=False`, use `width='content'`.
+페이지 렌더 OK — 예외 요소 0개
+[page] 정상 종료
+--- exit=0 (0=정상, 139=SEGFAULT, 134=abort, 124=timeout)
+
+===== [main] =====
+2026-07-13 06:36:54.701 WARNING streamlit.runtime.scriptrunner_utils.script_run_context: Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+메인 렌더 OK — 예외 요소 0개
+[main] 정상 종료
+--- exit=0 (0=정상, 139=SEGFAULT, 134=abort, 124=timeout)
+
+===== [parallel] =====
+analyze ? OK
+analyze ? OK
+analyze ? OK
+[parallel] 정상 종료
+--- exit=0 (0=정상, 139=SEGFAULT, 134=abort, 124=timeout)
+ALL_STAGES_DONE
