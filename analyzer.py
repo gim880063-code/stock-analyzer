@@ -1231,11 +1231,17 @@ def trade_signal_from_scores(
     risk_score = score_map.get("가격 리스크", 0)
     ratio = total / max_possible if max_possible > 0 else 0
 
+    # '강함' 판정의 두 번째 조건은 집중(상대강도·가치·재무) 부분합 — 실측 검증된
+    # 신호가 진짜 받쳐줄 때만 강함. (기존 '단기 부분합 ≥4'는 2026-07 가중치 개편으로
+    # 단기 만점이 4가 되어 사실상 도달 불가한 죽은 조건이 됐고, 단기 신호 묶음 자체가
+    # 5일 IC 0.011 로 무력 판정. focus ≥4 = 검증 신호 3개 중 최소 2개가 순양수)
+    focus_score, _focus_max = weighted_score(scores, FOCUS_ITEMS)
+
     # 라벨은 처방형("매수하세요")이 아닌 서술형("긍정 우세") — 사용자 판단 영역 보존.
-    if total >= 8 and short_term_score >= 4 and market_score >= 0 and risk_score >= -1:
+    if total >= 8 and focus_score >= 4 and market_score >= 0 and risk_score >= -1:
         action = "긍정 신호 강함"
         confidence = "높음"
-        reason = "가중 종합점수와 단기 수급·가격 반응 신호가 함께 우호적"
+        reason = "가중 종합점수와 검증된 집중 신호(상대강도·가치·재무)가 함께 우호적"
     elif total >= 4 and market_score >= 0 and risk_score >= -2:
         action = "긍정 우세"
         confidence = "보통"

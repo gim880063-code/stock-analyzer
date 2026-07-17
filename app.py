@@ -1064,8 +1064,7 @@ def render_summary_table(results: list[dict]) -> None:
                 "현재가": "-",
                 "등락률": "-",
                 **{c: None for c in SCORE_COLUMNS},
-                "단기": None,
-                "중기": None,
+                "집중": None,
                 "종합점수": None,
                 "의견": r["error"],
             }
@@ -1075,20 +1074,25 @@ def render_summary_table(results: list[dict]) -> None:
         score_map = {s["name"]: s["score"] for s in r["scores"]}
         fresh = (r.get("sources") or {}).get("fin_freshness") or {}
         stale_mark = " 📅" if fresh.get("is_stale") else ""
+        # 단기·중기 컬럼은 2026-07 폐지(예측력 무력·중복) — 검증된 집중 부분합만 표시.
+        try:
+            from analyzer import weighted_score as _ws, FOCUS_ITEMS as _fi
+            _focus_val = _ws(r.get("scores") or [], _fi)[0]
+        except Exception:
+            _focus_val = None
         row = {
             "종목": f"{r['name']} ({r['code']}){stale_mark}",
             "현재가": f"{r['last_close']:,.0f}원",
             "등락률": f"{r['change_pct']:+.2f}%",
             **{c: score_map.get(c) for c in SCORE_COLUMNS},
-            "단기": r.get("short_term_score"),
-            "중기": r.get("mid_term_score"),
+            "집중": _focus_val,
             "종합점수": r["total"],
             "의견": r["opinion"].split(" — ")[0],
         }
         rows.append(row)
 
     df = pd.DataFrame(rows)
-    score_cols = [c for c in SCORE_COLUMNS if c in df.columns] + ["단기", "중기", "종합점수"]
+    score_cols = [c for c in SCORE_COLUMNS if c in df.columns] + ["집중", "종합점수"]
 
     styled = (
         df.style
@@ -1368,13 +1372,17 @@ def render_stock_card(r: dict, favorites: list[str]) -> None:
         m1, m2, m3 = st.columns(3)
         m1.metric("현재가", f"{r['last_close']:,.0f}원", f"{r['change_pct']:+.2f}%")
         m2.metric("종합점수", f"{r['total']:+d}점")
-        st_score = r.get("short_term_score", 0)
-        st_max = r.get("short_term_max", 0)
-        mt_score = r.get("mid_term_score", 0)
-        mt_max = r.get("mid_term_max", 0)
+        # 단기·중기 부분합 표시는 2026-07 폐지 — 단기는 자기 시계(5일)에서 IC 0.011로
+        # 예측력 무력, 중기는 가중치 개편 후 집중과 중복. 집중 부분합만 보조 표시.
+        try:
+            from analyzer import weighted_score as _ws, FOCUS_ITEMS as _fi
+            _fs, _fs_max = _ws(r.get("scores") or [], _fi)
+            _focus_line = f"집중(상대강도·가치·재무) **{_fs:+d}**/{_fs_max}  \n"
+        except Exception:
+            _focus_line = ""
         m2.caption(
-            f"단기 **{st_score:+d}**/{st_max} · 중기 **{mt_score:+d}**/{mt_max}  \n"
-            f":gray[종합점수는 가격 반응 신호(상대강도·수급·거래량·공시 ×2)에 가중치 적용]"
+            _focus_line
+            + ":gray[종합점수는 실측 검증된 신호(상대강도·가치·재무 ×2)에 가중치 적용]"
         )
         m3.metric("의견", f"{opinion_emoji(r['total'])} {r['opinion'].split(' — ')[0]}")
 
@@ -2992,61 +3000,30 @@ if st.session_state.get("_view_mode") == "verifier":
 
     # ─── 탭 1: 발굴 가상 수익률 ───
     with tab_scout:
-        col_score, col_horizon = st.columns([2, 1])
-        with col_score:
-            score_type = st.radio(
-                "점수 종류",
-                options=["total", "short_term", "mid_term", "focus"],
-                format_func=lambda t: {
-                    "total": "종합 (가중)",
-                    "short_term": "단기 (거래량·수급·공시·시장강도)",
-                    "mid_term": "중기 (추세·가치·재무·성장성)",
-                    "focus": "집중 (상대강도·재무·가치)",
-                }[t],
-                horizontal=True,
-                key="sim_score_type",
-                help=(
-                    "단기 점수는 1~4주 매매에 중요도 높은 항목을 가중 합산. "
-                    "중기 점수는 분기 이상에서 효과 있는 항목만 합산. "
-                    "모멘텀·가격리스크는 의심 항목이라 종합점수에만 포함."
-                ),
-            )
-
-        # 점수 종류를 바꾸면 보유 시계를 권장값으로 자동 맞춤 (안내형). 단기→5일,
-        # 종합·집중→20일, 중기→60일. 사용자가 horizon 을 직접 바꾼 뒤 점수 종류를
-        # 그대로 두면 그 선택은 유지된다(권장은 점수 종류가 바뀔 때만 다시 적용).
-        _REC_HORIZON = {"short_term": "5d", "total": "20d", "focus": "20d", "mid_term": "60d"}
-        if st.session_state.get("_prev_sim_score_type") != score_type:
-            st.session_state["_prev_sim_score_type"] = score_type
-            st.session_state["sim_horizon"] = _REC_HORIZON.get(score_type, "20d")
-
-        with col_horizon:
-            horizon = st.radio(
-                "보유 시계",
-                options=["5d", "20d", "60d", "all"],
-                format_func=lambda h: {
-                    "5d": "5영업일",
-                    "20d": "20영업일",
-                    "60d": "60영업일",
-                    "all": "진입일~현재",
-                }[h],
-                horizontal=False,
-                key="sim_horizon",
-                help=(
-                    "5/20/60일은 같은 보유기간으로 비교 — 시계 도달 못 한 종목은 자동 제외. "
-                    "'진입일~현재'는 보유기간이 종목마다 다르고 시장 흐름에 영향 받음. "
-                    "진입일 = 발굴 다음 영업일 (장 마감 후 스크리닝이라 당일 종가엔 못 삼)."
-                ),
-            )
-
-        _rec = _REC_HORIZON.get(score_type)
-        if _rec and horizon not in (_rec, "all"):
-            _hl = {"5d": "5일", "20d": "20일", "60d": "60일", "all": "진입~현재"}
-            _sl = {"total": "종합", "short_term": "단기", "mid_term": "중기", "focus": "집중"}
-            st.caption(
-                f"⚠️ '{_sl.get(score_type, score_type)}' 점수는 **{_hl[_rec]} 보유**와 잘 맞아요. "
-                f"지금 {_hl[horizon]}은 신호와 기간이 어긋나 결과가 약해 보일 수 있어요."
-            )
+        # 점수 종류 선택은 2026-07 폐지 — 판단은 종합점수 하나로 통일.
+        # 단기는 자기 시계(5일)에서 IC 0.011(t 0.35)로 예측력 무력, 중기는 가중치
+        # 개편 후 집중과 사실상 중복. 집중은 내부 벤치마크로 유지 — '항목별 예측력'
+        # 탭의 walk-forward 비교표(종합 vs 집중)가 그 역할을 담당한다.
+        score_type = "total"
+        horizon = st.radio(
+            "보유 시계",
+            options=["5d", "20d", "60d", "all"],
+            format_func=lambda h: {
+                "5d": "5영업일",
+                "20d": "20영업일",
+                "60d": "60영업일",
+                "all": "진입일~현재",
+            }[h],
+            horizontal=True,
+            key="sim_horizon",
+            index=1,  # 기본 20영업일 — 종합점수 예측력이 가장 강한 시계
+            help=(
+                "5/20/60일은 같은 보유기간으로 비교 — 시계 도달 못 한 종목은 자동 제외. "
+                "'진입일~현재'는 보유기간이 종목마다 다르고 시장 흐름에 영향 받음. "
+                "진입일 = 발굴 다음 영업일 (장 마감 후 스크리닝이라 당일 종가엔 못 삼). "
+                "점수 신호는 20영업일 시계에서 가장 강해 기본값으로 설정."
+            ),
+        )
 
         min_hold_days = 0
         if horizon == "all":
@@ -3129,18 +3106,11 @@ if st.session_state.get("_view_mode") == "verifier":
 
         if result["total_count"] == 0:
             short_hold = result.get("excluded_short_hold", 0)
-            missing = result.get("missing_data_count", 0)
-            if score_type in ("short_term", "mid_term") and missing > 0 and short_hold == 0:
-                st.info(
-                    f"`{score_type}` 점수가 기록된 발굴 종목이 없습니다. "
-                    "단기·중기 점수는 항목별 스냅샷이 있어야 계산되는데, 새로 발굴된 종목부터 데이터가 쌓입니다.\n\n"
-                    "사이드바에서 **🔍 발굴 시작**을 한 번 다시 돌려보세요."
-                )
-            elif horizon != "all" and short_hold > 0:
+            if horizon != "all" and short_hold > 0:
                 st.info(
                     f"{horizon} 시계에 도달한 발굴 종목이 없습니다 "
                     f"({short_hold}개가 보유기간 부족으로 제외됨). "
-                    "더 짧은 시계로 보거나 '발굴일~현재'를 선택해보세요."
+                    "더 짧은 시계로 보거나 '진입일~현재'를 선택해보세요."
                 )
             else:
                 st.info(
