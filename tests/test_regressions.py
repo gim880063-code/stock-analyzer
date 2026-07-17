@@ -170,25 +170,36 @@ class LlmTests(unittest.TestCase):
 
 
 class ScoringTests(unittest.TestCase):
-    def test_weighted_score_prioritizes_price_reaction_items(self):
+    def test_weighted_score_prioritizes_verified_items(self):
+        # 2026-07-17 재검증 반영: 실측 예측력(20d rank-IC)이 강한 상대강도·가치·재무가
+        # 2배, 20d 에서만 유효한 수급은 1배.
         scores = [
             {"name": "시장 상대강도", "score": 1, "max": 1},
             {"name": "수급", "score": 1, "max": 1},
             {"name": "가치", "score": 1, "max": 1},
         ]
         total, max_possible = analyzer.weighted_score(scores)
-        self.assertEqual(total, 5)
+        self.assertEqual(total, 5)   # 2 + 1 + 2
         self.assertEqual(max_possible, 5)
 
-    def test_market_regime_uses_weight_one_to_avoid_market_overdominance(self):
-        # 시장 국면은 모든 종목에 같은 ± 부여 → 종합점수가 시장 trend에 과도 의존하지
-        # 않게 가중치 1로 고정. 가격 반응 신호 (수급/거래량/공시/시장 상대강도, 가중치 2)
-        # 와 차별화.
+    def test_verified_factor_weights_2026_07(self):
+        # 가중치 정책 스냅샷 — 실수로 되돌리지 않게 고정.
+        # 검증 3회(2026-06, 07 초, 07-17) 연속 상위 IC: 가치·재무·상대강도 → 2배.
+        for name in ("가치", "재무 건전성", "시장 상대강도"):
+            self.assertEqual(analyzer.SCORE_WEIGHTS[name], 2, name)
+        # 역방향/무의미 실측 → 중립화 (표시는 유지, 종합점수 기여 0).
+        for name in ("거래량", "추세", "시장 국면"):
+            self.assertEqual(analyzer.SCORE_WEIGHTS[name], 0, name)
+
+    def test_market_regime_weight_zero_no_cross_sectional_value(self):
+        # 시장 국면은 날짜별로 모든 종목에 같은 값 → 종목 선별에 기여 불가, 문턱만
+        # 경기순응적으로 흔듦(강세장 전원 +1 → 고점 통과 증가). 2026-07 가중치 0.
+        # 국면 대응은 effective_min_score(리스크오프 +2)가 전담.
         total, max_possible = analyzer.weighted_score([
             {"name": "시장 국면", "score": 1, "max": 1},
         ])
-        self.assertEqual(total, 1)
-        self.assertEqual(max_possible, 1)
+        self.assertEqual(total, 0)
+        self.assertEqual(max_possible, 0)
 
     def test_oversold_rsi_is_not_counted_as_buy_signal_by_itself(self):
         df = pd.DataFrame({"Close": list(range(100, 60, -1))})
@@ -233,8 +244,10 @@ class ScoringTests(unittest.TestCase):
             {"name": "시장 국면", "score": 1, "max": 1},
             {"name": "시장 상대강도", "score": 1, "max": 1},
             {"name": "수급", "score": 1, "max": 1},
-            {"name": "거래량", "score": 1, "max": 1},
-            {"name": "추세", "score": 1, "max": 1},
+            {"name": "공시", "score": 1, "max": 1},
+            {"name": "가치", "score": 1, "max": 1},
+            {"name": "재무 건전성", "score": 1, "max": 1},
+            {"name": "성장성", "score": 1, "max": 1},
             {"name": "가격 리스크", "score": 0, "max": 0},
         ]
         total, max_possible = analyzer.weighted_score(scores)
@@ -257,11 +270,11 @@ class VerifierConsistencyTests(unittest.TestCase):
             "added_score": 999,  # 의도적으로 비현실적 값 — 무시되어야
             "added_scores": {
                 "시장 상대강도": 1,  # weight 2 → 2
-                "수급": 1,            # weight 2 → 2
-                "추세": 1,            # weight 1 → 1
+                "수급": 1,            # weight 1 → 1
+                "추세": 1,            # weight 0 → 0
             },
         }
-        self.assertEqual(verifier._extract_score(info, "total"), 5)
+        self.assertEqual(verifier._extract_score(info, "total"), 3)
 
     def test_total_falls_back_to_stored_for_legacy_entries(self):
         """added_scores 없는 옛 엔트리는 stored added_score 그대로."""
@@ -315,13 +328,14 @@ class VerifierHorizonTests(unittest.TestCase):
             prices = list(range(100, 100 + n))  # 100, 101, 102, ...
         return pd.Series(prices, index=idx, dtype=float)
 
-    def test_horizon_5d_returns_close_at_5_trading_days_out(self):
-        """5d horizon은 발굴일 + 5 영업일 시점 종가를 반환."""
+    def test_horizon_5d_enters_next_trading_day(self):
+        """진입 = 발굴 *다음* 영업일 종가 (장 마감 후 스크리닝이라 당일 종가엔 못 삼),
+        5d horizon 은 진입일 + 5 영업일 시점 종가."""
         import verifier
         series = self._make_series(prices=[100.0 + i for i in range(30)])
         start, end, days, _ = verifier._horizon_return(series, "2026-01-02", "5d")
-        self.assertEqual(start, 100.0)
-        self.assertEqual(end, 105.0)  # 5영업일 후
+        self.assertEqual(start, 101.0)  # 발굴 다음 영업일 종가에 진입
+        self.assertEqual(end, 106.0)    # 진입 + 5영업일
         self.assertEqual(days, 5)
 
     def test_horizon_returns_none_when_window_not_reached(self):
@@ -333,21 +347,21 @@ class VerifierHorizonTests(unittest.TestCase):
         self.assertIsNone(days)
 
     def test_horizon_all_uses_last_close(self):
-        """horizon='all' 은 발굴일 ~ 마지막 거래일."""
+        """horizon='all' 은 진입일(발굴 다음 영업일) ~ 마지막 거래일."""
         import verifier
         series = self._make_series(n=10, prices=[100.0, 101, 102, 103, 104, 105, 106, 107, 108, 110])
         start, end, days, _ = verifier._horizon_return(series, "2026-01-02", "all")
-        self.assertEqual(start, 100.0)
+        self.assertEqual(start, 101.0)  # 다음 영업일 진입
         self.assertEqual(end, 110.0)
-        self.assertEqual(days, 9)
+        self.assertEqual(days, 8)
 
     def test_start_date_snaps_to_next_trading_day(self):
-        """발굴일이 주말이면 다음 영업일로 자동 조정."""
+        """발굴일이 주말이면 그다음 첫 거래일이 진입일."""
         import verifier
         series = self._make_series(start="2026-01-05", n=10)  # 월요일부터
-        # 2026-01-03(토) 은 비영업일 → 다음 영업일 2026-01-05 가 start 가 돼야 함
+        # 2026-01-03(토) 발굴 → 첫 매수 가능일 2026-01-05(월) 이 진입일이 돼야 함
         start, end, days, _ = verifier._horizon_return(series, "2026-01-03", "5d")
-        self.assertIsNotNone(start)
+        self.assertEqual(start, 100.0)  # 월요일 종가 (그 뒤로 밀리면 안 됨)
         self.assertEqual(days, 5)
 
 
@@ -529,18 +543,19 @@ class ScoreNameAliasTests(unittest.TestCase):
     def test_verify_extract_score_normalizes_old_name(self):
         import verifier
         # 5/14~5/26 발굴분: added_scores에 옛 "재무" 키 → 중기 점수에 재무가 포함돼야.
-        # 정규화 없으면 "재무"가 MID_TERM_ITEMS 필터에서 빠져 2점으로 과소계상됨.
+        # 정규화 없으면 "재무"가 MID_TERM_ITEMS 필터에서 빠져 과소계상됨.
+        # 재무 2점×가중 2 + 성장성 1×1 + 추세 1×0 = 5
         info = {"added_scores": {"재무": 2, "성장성": 1, "추세": 1}}
-        self.assertEqual(verifier._extract_score(info, "mid_term"), 4)
+        self.assertEqual(verifier._extract_score(info, "mid_term"), 5)
 
 
 class FocusScoreTests(unittest.TestCase):
     def test_focus_extracts_only_focus_items(self):
         import verifier
-        # 집중 = 시장 상대강도(가중 2) + 재무 건전성(1) + 가치(1), 나머지 항목은 제외
+        # 집중 = 시장 상대강도(가중 2) + 재무 건전성(2) + 가치(2), 나머지 항목은 제외
         info = {"added_scores": {"시장 상대강도": 1, "재무 건전성": 1, "가치": 1,
                                  "추세": 1, "수급": 1}}
-        self.assertEqual(verifier._extract_score(info, "focus"), 4)
+        self.assertEqual(verifier._extract_score(info, "focus"), 6)
 
 
 class TrailingStopTests(unittest.TestCase):

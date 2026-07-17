@@ -23,6 +23,10 @@
     걸려 들어와 분포가 편향됨 → 실제 분포에서 상/중/하 1/3씩.
   - 가격 데이터: FinanceDataReader 로 발굴일~현재 종가를 새로 조회 (stale history
     의존 제거). 종목당 1회 fetch 후 lru_cache.
+  - 진입가 = 발굴 *다음 영업일* 종가 (2026-07 보정): 스크리닝이 장 마감 후 돌아
+    발굴일 종가에는 살 수 없고, 급등 신호 종목의 다음날 갭 상승이 수익률을
+    낙관 왜곡하던 것을 제거. (발굴 시뮬레이션에만 적용 — IC/walk-forward 는
+    순위 변별력 측정이라 점수 기록일 종가 관례 유지)
 """
 from collections import defaultdict
 from datetime import datetime, timedelta
@@ -64,7 +68,7 @@ def money_summary(
     per_stock: int = MONEY_PER_STOCK,
     kinds: tuple = ("picked", "adaptive"),
 ) -> dict | None:
-    """통과 종목을 발굴 시점마다 per_stock 원씩 샀다면의 결과.
+    """통과 종목을 발굴 다음 영업일 종가에 per_stock 원씩 샀다면의 결과.
 
     반환: {"n", "invested", "hold_value", "trail_value", "market_value",
            "wins", "horizon"} — 수익률 데이터가 하나도 없으면 None.
@@ -221,6 +225,23 @@ def _find_idx_on_or_after(series: pd.Series, date_str: str) -> int | None:
     return int(pos)
 
 
+def _find_idx_after(series: pd.Series, date_str: str) -> int | None:
+    """series.index 에서 date_str *초과* 첫 위치 (실제 매수 가능일).
+
+    스크리닝은 장 마감 후(16:10 KST) 돌아서 발굴일 종가에는 살 수 없다 —
+    실제 진입 가능한 첫 종가는 다음 영업일. 발굴일이 휴장일이면(주말 수동 실행 등)
+    그다음 첫 거래일이 진입일이다. 없으면 None.
+    """
+    try:
+        target = pd.Timestamp(date_str)
+    except Exception:
+        return None
+    pos = series.index.searchsorted(target, side="right")
+    if pos >= len(series):
+        return None
+    return int(pos)
+
+
 def _horizon_return(
     series: pd.Series,
     start_date: str,
@@ -234,13 +255,16 @@ def _horizon_return(
 
     Returns:
         (start_close, end_close, days_held_trading, end_idx)
-        - days_held_trading: 영업일 수 (start_idx ~ end_idx 거리)
+        - start_close: *진입가* — 발굴 다음 영업일 종가. 발굴일 종가가 아님:
+          스크리닝이 장 마감 후 돌아 그 가격엔 살 수 없고, 급등 신호 종목은
+          다음날 갭 상승이 흔해 발굴일 종가 기준은 수익률을 낙관 왜곡한다.
+        - days_held_trading: 영업일 수 (진입일 ~ end_idx 거리)
         - 데이터 부족 시 (None, None, None, None)
     """
     if series is None or series.empty:
         return None, None, None, None
 
-    start_idx = _find_idx_on_or_after(series, start_date)
+    start_idx = _find_idx_after(series, start_date)
     if start_idx is None:
         return None, None, None, None
 
@@ -442,19 +466,27 @@ def verify_scouted(
     score_type: str = "total",
     horizon: str = "all",
     min_hold_days: int = DEFAULT_MIN_HOLD_DAYS,
-    kind: str = "picked",
+    kind="picked",
 ) -> dict:
     """
     발굴 종목들의 발굴 후 수익률 통계.
 
+    진입가 규약: 발굴 *다음 영업일* 종가 (2026-07 보정). 스크리닝은 장 마감 후
+    돌아서 발굴일 종가에는 실제로 살 수 없기 때문 — 시장 지수도 같은 날 기준으로
+    맞춰 초과수익이 공정하게 비교된다. (항목별 IC·walk-forward 는 순위 변별력
+    측정이라 관례대로 점수 기록일 종가 기준을 유지 — verify_item_scores 참고)
+
     Args:
         score_type: "total" | "short_term" | "mid_term"
         horizon: "5d" | "20d" | "60d" | "all"
-            - 5d/20d/60d: 발굴일 + N 영업일 시점 종가까지의 수익률
+            - 5d/20d/60d: 진입일 + N 영업일 시점 종가까지의 수익률
               (해당 기간 도달 못 한 종목은 자동 제외)
-            - all: 발굴일 ~ 마지막 거래일 (보유기간 종목마다 다름)
+            - all: 진입일 ~ 마지막 거래일 (보유기간 종목마다 다름)
         min_hold_days: 통계 계산에 포함되는 최소 보유 영업일.
             horizon="all" 일 때만 의미. horizon="5d"는 자동으로 5일 보유한 종목만.
+        kind: "picked" | "adaptive" | "observed" | "all" | 또는 이들의 튜플/셋.
+            튜플이면 해당 종류들을 합쳐 집계 (예: ("picked", "adaptive") =
+            실제 매수 대상 전체).
 
     반환:
         rows: 종목별 상세 (excess_return_pct 내림차순)
@@ -479,14 +511,19 @@ def verify_scouted(
     items = scouted.load_scouted()
     today = _today_key()
 
+    # kind 필터 정규화 — 문자열 하나 또는 튜플/셋. "all" 은 필터 없음.
+    kind_filter: set | None = None
+    if kind != "all":
+        kind_filter = {kind} if isinstance(kind, str) else set(kind)
+
     rows: list[dict] = []
     excluded_short_hold = 0
     missing_data_count = 0
 
     for code, info in items.items():
         # kind 필터 — 기본 'picked'(통과 발굴)만. observed(관찰)가 섞여 통과 종목
-        # 성과 통계가 희석되지 않게 분리한다. "all" 이면 둘 다 포함.
-        if kind != "all" and scouted._entry_kind(info) != kind:
+        # 성과 통계가 희석되지 않게 분리한다.
+        if kind_filter is not None and scouted._entry_kind(info) not in kind_filter:
             continue
         added_at = info.get("added_at")
         if not added_at:
@@ -530,7 +567,8 @@ def verify_scouted(
         market_ret = None
         excess = None
         if market_series is not None and not market_series.empty:
-            m_start_idx = _find_idx_on_or_after(market_series, added_at)
+            # 시장도 종목과 같은 진입 규약(발굴 다음 영업일)으로 맞춰 공정 비교.
+            m_start_idx = _find_idx_after(market_series, added_at)
             if m_start_idx is not None:
                 # 시장도 같은 영업일 기준으로 매핑.
                 if horizon == "all":

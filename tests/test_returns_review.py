@@ -255,11 +255,11 @@ class FocusGateTests(unittest.TestCase):
     def test_focus_subscore_weighted(self):
         r = {"scores": [
             {"name": "시장 상대강도", "score": 1, "max": 1},   # 가중 2
-            {"name": "재무 건전성", "score": -1, "max": 1},    # 가중 1
-            {"name": "가치", "score": -1, "max": 1},           # 가중 1
+            {"name": "재무 건전성", "score": 1, "max": 1},     # 가중 2
+            {"name": "가치", "score": -1, "max": 1},           # 가중 2
             {"name": "거래량", "score": 1, "max": 1},          # 집중 항목 아님
         ]}
-        self.assertEqual(analyzer.focus_subscore(r), 2 - 1 - 1)  # = 0 (게이트 통과)
+        self.assertEqual(analyzer.focus_subscore(r), 2 + 2 - 2)  # = 2 (게이트 통과)
 
     def test_focus_subscore_negative(self):
         r = {"scores": [

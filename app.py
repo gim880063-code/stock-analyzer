@@ -3028,19 +3028,20 @@ if st.session_state.get("_view_mode") == "verifier":
                     "5d": "5영업일",
                     "20d": "20영업일",
                     "60d": "60영업일",
-                    "all": "발굴일~현재",
+                    "all": "진입일~현재",
                 }[h],
                 horizontal=False,
                 key="sim_horizon",
                 help=(
                     "5/20/60일은 같은 보유기간으로 비교 — 시계 도달 못 한 종목은 자동 제외. "
-                    "'발굴일~현재'는 보유기간이 종목마다 다르고 시장 흐름에 영향 받음."
+                    "'진입일~현재'는 보유기간이 종목마다 다르고 시장 흐름에 영향 받음. "
+                    "진입일 = 발굴 다음 영업일 (장 마감 후 스크리닝이라 당일 종가엔 못 삼)."
                 ),
             )
 
         _rec = _REC_HORIZON.get(score_type)
         if _rec and horizon not in (_rec, "all"):
-            _hl = {"5d": "5일", "20d": "20일", "60d": "60일", "all": "발굴~현재"}
+            _hl = {"5d": "5일", "20d": "20일", "60d": "60일", "all": "진입~현재"}
             _sl = {"total": "종합", "short_term": "단기", "mid_term": "중기", "focus": "집중"}
             st.caption(
                 f"⚠️ '{_sl.get(score_type, score_type)}' 점수는 **{_hl[_rec]} 보유**와 잘 맞아요. "
@@ -3058,16 +3059,32 @@ if st.session_state.get("_view_mode") == "verifier":
                 help="발굴 직후 종목은 신호가 작동할 시간이 없어 통계에 노이즈를 만듦.",
             )
 
-        # 헤드라인은 전체(모든 추적 종목) 기준으로 통일 — 유형(발굴/적응/관찰)을
-        # 화면에서 고르게 하지 않는다. 유형별 성과는 아래 비교표로 한눈에 보여주고,
-        # 데이터의 유형 태그는 '어떤 관문이 실제로 돈이 됐는지' 검증 + 적응 통과
-        # 자동 확대 판정의 원료로 계속 쓰인다.
-        result = verifier.verify_scouted(
-            score_type=score_type,
-            horizon=horizon,
-            min_hold_days=min_hold_days,
-            kind="all",
-        )
+        # 헤드라인은 실제 매수 대상인 통과(발굴+적응) 기준 — 관찰(observed)은
+        # 통과 못 한 대조군이라 섞으면 '내가 산다고 가정한 종목'의 성적이 희석돼
+        # 보인다 (2026-07 보정: 바로 아래 돈 단위 요약과 기준 통일). 관찰 포함
+        # 유형별 성과는 아래 비교표에서 나란히 보여주고, 적응 통과 자동 확대
+        # 판정의 원료로도 계속 쓰인다.
+        try:
+            result = verifier.verify_scouted(
+                score_type=score_type,
+                horizon=horizon,
+                min_hold_days=min_hold_days,
+                kind=("picked", "adaptive"),
+            )
+            if not result.get("total_count"):
+                # 통과 트랙이 비어 있으면(초기 데이터 등) 전체 기준으로 폴백 —
+                # 배포 직후 stale verifier 모듈(튜플 미지원 → 전부 필터됨)도 커버.
+                _fb = verifier.verify_scouted(
+                    score_type=score_type, horizon=horizon,
+                    min_hold_days=min_hold_days, kind="all",
+                )
+                if _fb.get("total_count"):
+                    result = _fb
+        except Exception:
+            result = verifier.verify_scouted(
+                score_type=score_type, horizon=horizon,
+                min_hold_days=min_hold_days, kind="all",
+            )
 
         _lvl, _msg = _verdict_scout(result)
         _emit_verdict(_lvl, _msg)
@@ -3079,14 +3096,15 @@ if st.session_state.get("_view_mode") == "verifier":
         except Exception:
             _ms = None
         if _ms:
-            _hl2 = {"5d": "5영업일 보유", "20d": "20영업일 보유", "60d": "60영업일 보유", "all": "발굴일~현재"}
-            st.markdown(f"##### 💰 통과 종목을 그 시점에 샀다면 ({_hl2.get(_ms['horizon'], _ms['horizon'])} 기준)")
+            _hl2 = {"5d": "5영업일 보유", "20d": "20영업일 보유", "60d": "60영업일 보유", "all": "진입일~현재"}
+            st.markdown(f"##### 💰 통과 종목을 발굴 다음날 샀다면 ({_hl2.get(_ms['horizon'], _ms['horizon'])} 기준)")
             _inv = _ms["invested"]
             m1, m2, m3, m4 = st.columns(4)
             m1.metric(
                 "투입 (가정)", f"{_inv / 10_000:,.0f}만원",
                 f"{_ms['n']}종목 × 100만원", delta_color="off",
-                help="발굴 통과(발굴+적응) 종목마다 발굴일 종가에 100만원씩 샀다고 가정. 관찰은 제외.",
+                help="발굴 통과(발굴+적응) 종목마다 발굴 다음 영업일 종가에 100만원씩 샀다고 가정 "
+                     "(스크리닝이 장 마감 후 돌아 발굴일 종가에는 살 수 없음). 관찰은 제외.",
             )
             m2.metric(
                 "그냥 보유", f"{_ms['hold_value'] / 10_000:,.0f}만원",
@@ -3215,7 +3233,7 @@ if st.session_state.get("_view_mode") == "verifier":
             if len(_kind_rows) >= 2:
                 st.markdown("##### 유형별 성과 비교")
                 st.caption(
-                    "위 헤드라인은 전체 기준. 어느 관문(발굴/적응/관찰)이 실제로 돈이 됐는지 나란히 비교합니다. "
+                    "위 헤드라인은 실제 매수 대상인 통과(발굴+적응) 기준. 어느 관문이 실제로 돈이 됐는지 나란히 비교합니다. "
                     "'관찰'은 통과 못 한 종목의 대조군 — 관찰이 통과보다 나쁘면 걸러낸 게 옳았다는 뜻입니다."
                 )
                 st.dataframe(
@@ -3260,7 +3278,7 @@ if st.session_state.get("_view_mode") == "verifier":
                     "보유일": r.get("days_held") if r.get("days_held") is not None else "-",
                     "발굴점수": f"{r['added_score']:+d}" if r["added_score"] is not None else "-",
                     "현재점수": f"{cur_score:+d}" if cur_score is not None else "-",
-                    "발굴가": f"{r['added_close']:,.0f}",
+                    "진입가(발굴 다음날 종가)": f"{r['added_close']:,.0f}",
                     "현재가": f"{r['current_close']:,.0f}",
                     "수익률(%)": r["return_pct"],
                     "손절적용(%)": r.get("trail_return_pct") if r.get("trail_return_pct") is not None else "-",
